@@ -1,6 +1,6 @@
 # Kube Generic Operations
 
-A reusable library of generic, ergonomic functions for the most common Kubernetes operator patterns. Built on top of [`kube`](https://docs.rs/kube) and [`kube-runtime`](https://docs.rs/kube-runtime), it eliminates boilerplate across operators by providing a single, well-tested implementation for each pattern.
+A reusable library of generic, ergonomic functions for the most common Kubernetes operator patterns. Built on top of [`kube`](https://docs.rs/kube) and [`kube-runtime`](https://docs.rs/kube-runtime), it eliminates boilerplate across operators by providing a single, well tested implementation for each pattern.
 
 
 ## Architecture Overview
