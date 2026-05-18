@@ -96,22 +96,22 @@ let deleted = delete_namespaced_resource::<ConfigMap>(client.clone(), "my-ns", "
 ### Patch status
 
 ```rust
-use kube_genops::status::{patch_cluster_status, patch_namespaced_status};
+use kube_genops::status::{patch_status, Cluster, Namespaced};
 use serde::Serialize;
 
 #[derive(Serialize)]
 struct MyStatus { ready: bool, message: String }
 
 // Cluster-scoped CRD
-patch_cluster_status::<MyCR, _>(
-    client.clone(), "my-resource",
+patch_status::<MyCR, _, _>(
+    client.clone(), Cluster, "my-resource",
     MyStatus { ready: true, message: "Reconciled".into() },
     "my-operator",
 ).await?;
 
 // Namespaced CRD
-patch_namespaced_status::<MyCR, _>(
-    client.clone(), "my-namespace", "my-resource",
+patch_status::<MyCR, _, _>(
+    client.clone(), Namespaced("my-namespace"), "my-resource",
     MyStatus { ready: true, message: "Reconciled".into() },
     "my-operator",
 ).await?;
