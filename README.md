@@ -96,7 +96,8 @@ let deleted = delete_namespaced_resource::<ConfigMap>(client.clone(), "my-ns", "
 ### Patch status
 
 ```rust
-use kube_genops::status::{patch_status, Cluster, Namespaced};
+use kube_genops::scope::{Cluster, Namespaced};
+use kube_genops::status::patch_status;
 use serde::Serialize;
 
 #[derive(Serialize)]

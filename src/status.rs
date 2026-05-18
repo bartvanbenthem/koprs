@@ -1,4 +1,3 @@
-use k8s_openapi::NamespaceResourceScope;
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client, Resource};
 use serde::de::DeserializeOwned;
@@ -7,51 +6,7 @@ use serde_json::json;
 use tracing::info;
 
 use crate::error::Result;
-
-// ---------------------------------------------------------------------------
-// Scope types
-// ---------------------------------------------------------------------------
-
-/// Marker type for cluster-scoped resources.
-pub struct Cluster;
-
-/// Marker type for namespace-scoped resources, carrying the target namespace.
-pub struct Namespaced<'a>(pub &'a str);
-
-mod private {
-    pub trait Sealed {}
-    impl Sealed for super::Cluster {}
-    impl Sealed for super::Namespaced<'_> {}
-}
-
-/// Sealed trait that constructs the correct [`Api`] for a given scope.
-pub trait ApiScope<K>: private::Sealed
-where
-    K: Resource + Clone + DeserializeOwned + Serialize + 'static,
-    K::DynamicType: Default,
-{
-    fn into_api(self, client: Client) -> Api<K>;
-}
-
-impl<K> ApiScope<K> for Cluster
-where
-    K: Resource + Clone + DeserializeOwned + Serialize + 'static,
-    K::DynamicType: Default,
-{
-    fn into_api(self, client: Client) -> Api<K> {
-        Api::all(client)
-    }
-}
-
-impl<K> ApiScope<K> for Namespaced<'_>
-where
-    K: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Serialize + 'static,
-    K::DynamicType: Default,
-{
-    fn into_api(self, client: Client) -> Api<K> {
-        Api::namespaced(client, self.0)
-    }
-}
+use crate::scope::ApiScope;
 
 // ---------------------------------------------------------------------------
 // Private core helper
@@ -91,7 +46,8 @@ where
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube_genops::status::{patch_status, Cluster, Namespaced};
+/// use kube_genops::scope::{Cluster, Namespaced};
+/// use kube_genops::status::patch_status;
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]
@@ -122,77 +78,5 @@ where
     let ctx = K::DynamicType::default();
     let kind = K::kind(&ctx);
     info!(%kind, %name, "Patching status");
-    let api = scope.into_api(client);
-    apply_status_patch(api, name, status, field_manager).await
-}
-
-/// Patch the status subresource of a cluster-scoped custom resource using Server-Side Apply.
-///
-/// # Example
-///
-/// ```no_run
-/// use kube::Client;
-/// use kube_genops::status::patch_cluster_status;
-/// use serde::Serialize;
-///
-/// #[derive(Serialize)]
-/// struct MyStatus { ready: bool }
-///
-/// # async fn example(client: Client, name: &str) -> anyhow::Result<()> {
-/// // patch_cluster_status::<MyCR, _>(client, name, MyStatus { ready: true }, "my-operator").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn patch_cluster_status<K, S>(
-    client: Client,
-    name: &str,
-    status: S,
-    field_manager: &str,
-) -> Result<K>
-where
-    K: Resource + Clone + DeserializeOwned + Serialize + 'static,
-    K::DynamicType: Default,
-    S: Serialize,
-{
-    let ctx = K::DynamicType::default();
-    let kind = K::kind(&ctx);
-    info!(%kind, %name, "Patching cluster-scoped status");
-    let api: Api<K> = Api::all(client);
-    apply_status_patch(api, name, status, field_manager).await
-}
-
-/// Patch the status subresource of a namespaced custom resource using Server-Side Apply.
-///
-/// # Example
-///
-/// ```no_run
-/// use kube::Client;
-/// use kube_genops::status::patch_namespaced_status;
-/// use serde::Serialize;
-///
-/// #[derive(Serialize)]
-/// struct MyStatus { ready: bool }
-///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
-/// // patch_namespaced_status::<MyCR, _>(client, "my-ns", "my-cr", MyStatus { ready: true }, "my-operator").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn patch_namespaced_status<K, S>(
-    client: Client,
-    namespace: &str,
-    name: &str,
-    status: S,
-    field_manager: &str,
-) -> Result<K>
-where
-    K: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Serialize + 'static,
-    K::DynamicType: Default,
-    S: Serialize,
-{
-    let ctx = K::DynamicType::default();
-    let kind = K::kind(&ctx);
-    info!(%kind, %name, %namespace, "Patching namespaced status");
-    let api: Api<K> = Api::namespaced(client, namespace);
-    apply_status_patch(api, name, status, field_manager).await
+    apply_status_patch(scope.into_api(client), name, status, field_manager).await
 }
