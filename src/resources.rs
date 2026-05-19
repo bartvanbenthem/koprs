@@ -81,28 +81,19 @@ where
 
 /// Apply (create or update) a Kubernetes resource using Server-Side Apply.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
-/// correct API surface at compile time. Prefer [`apply_cluster_resource`] or
-/// [`apply_namespaced_resource`] for the common cases — they are thin wrappers
-/// around this function.
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::{NamespaceResourceScope, Metadata};
-/// use kube::core::ObjectMeta;
 /// use kube_genops::resources::apply_resource;
 /// use kube_genops::scope::Namespaced;
-/// use serde::{Deserialize, Serialize};
+/// use kube_genops::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client, resource: MyCR) -> anyhow::Result<()>
 /// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Metadata<Ty = ObjectMeta>
-/// #         + Clone + std::fmt::Debug + Default + Send + Sync
-/// #         + Serialize + for<'de> Deserialize<'de> + 'static,
+/// #     MyCR: NamespacedResource,
 /// # {
 /// apply_resource::<MyCR, _>(
 ///     client,
@@ -132,30 +123,17 @@ where
 
 /// Delete a Kubernetes resource by name.
 ///
-/// Returns `Ok(false)` if the resource did not exist.
-///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
-/// correct API surface at compile time. Prefer [`delete_cluster_resource`] or
-/// [`delete_namespaced_resource`] for the common cases — they are thin wrappers
-/// around this function.
-///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::{NamespaceResourceScope, Metadata};
-/// use kube::core::ObjectMeta;
 /// use kube_genops::resources::delete_resource;
 /// use kube_genops::scope::Namespaced;
-/// use serde::{Deserialize, Serialize};
+/// use kube_genops::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Metadata<Ty = ObjectMeta>
-/// #         + Clone + std::fmt::Debug + Default + Send + Sync
-/// #         + Serialize + for<'de> Deserialize<'de> + 'static,
+/// #     MyCR: NamespacedResource,
 /// # {
 /// delete_resource::<MyCR, _>(
 ///     client,
@@ -177,28 +155,18 @@ where
 // Convenience wrappers — cluster-scoped
 // ---------------------------------------------------------------------------
 
-/// Apply (create or update) a **cluster-scoped** resource using Server-Side Apply.
-///
-/// Delegates to [`apply_resource`] with [`Cluster`] as the scope. The resource
-/// type `T` must implement `Resource<Scope = ClusterResourceScope>`, which the
-/// compiler enforces — passing a namespace-scoped type is a compile error.
+/// Apply a cluster-scoped resource.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::{ClusterResourceScope, Metadata};
-/// use kube::core::ObjectMeta;
 /// use kube_genops::resources::apply_cluster_resource;
-/// use serde::{Deserialize, Serialize};
+/// use kube_genops::traits::ClusterResource;
 ///
 /// # async fn example<MyCR>(client: Client, resource: MyCR) -> anyhow::Result<()>
 /// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = ClusterResourceScope>
-/// #         + Metadata<Ty = ObjectMeta>
-/// #         + Clone + std::fmt::Debug + Default + Send + Sync
-/// #         + Serialize + for<'de> Deserialize<'de> + 'static,
+/// #     MyCR: ClusterResource,
 /// # {
 /// apply_cluster_resource::<MyCR>(client, &resource, "my-operator").await?;
 /// # Ok(())
@@ -215,26 +183,18 @@ where
     apply_resource::<T, _>(client, Cluster, resource, field_manager).await
 }
 
-/// Delete a **cluster-scoped** resource by name.
-///
-/// Delegates to [`delete_resource`] with [`Cluster`] as the scope. Returns
-/// `Ok(false)` if the resource did not exist. The resource type `T` must
-/// implement `Resource<Scope = ClusterResourceScope>`.
+/// Delete a cluster-scoped resource.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::ClusterResourceScope;
 /// use kube_genops::resources::delete_cluster_resource;
-/// use serde::Deserialize;
+/// use kube_genops::traits::ClusterResource;
 ///
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = ClusterResourceScope>
-/// #         + Clone + std::fmt::Debug + Send + Sync
-/// #         + for<'de> Deserialize<'de> + 'static,
+/// #     MyCR: ClusterResource,
 /// # {
 /// delete_cluster_resource::<MyCR>(client, "my-resource").await?;
 /// # Ok(())
@@ -251,29 +211,18 @@ where
 // Convenience wrappers — namespaced
 // ---------------------------------------------------------------------------
 
-/// Apply (create or update) a **namespace-scoped** resource using Server-Side Apply.
-///
-/// Delegates to [`apply_resource`] with [`Namespaced`] as the scope. The
-/// resource type `T` must implement `Resource<Scope = NamespaceResourceScope>`,
-/// which the compiler enforces — passing a cluster-scoped type is a compile
-/// error.
+/// Apply a namespaced resource.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::{NamespaceResourceScope, Metadata};
-/// use kube::core::ObjectMeta;
 /// use kube_genops::resources::apply_namespaced_resource;
-/// use serde::{Deserialize, Serialize};
+/// use kube_genops::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client, resource: MyCR) -> anyhow::Result<()>
 /// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Metadata<Ty = ObjectMeta>
-/// #         + Clone + std::fmt::Debug + Default + Send + Sync
-/// #         + Serialize + for<'de> Deserialize<'de> + 'static,
+/// #     MyCR: NamespacedResource,
 /// # {
 /// apply_namespaced_resource::<MyCR>(client, "my-namespace", &resource, "my-operator").await?;
 /// # Ok(())
@@ -291,26 +240,18 @@ where
     apply_resource::<T, _>(client, Namespaced(namespace), resource, field_manager).await
 }
 
-/// Delete a **namespace-scoped** resource by name.
-///
-/// Delegates to [`delete_resource`] with [`Namespaced`] as the scope. Returns
-/// `Ok(false)` if the resource did not exist. The resource type `T` must
-/// implement `Resource<Scope = NamespaceResourceScope>`.
+/// Delete a namespaced resource.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::NamespaceResourceScope;
 /// use kube_genops::resources::delete_namespaced_resource;
-/// use serde::Deserialize;
+/// use kube_genops::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Clone + std::fmt::Debug + Send + Sync
-/// #         + for<'de> Deserialize<'de> + 'static,
+/// #     MyCR: NamespacedResource,
 /// # {
 /// delete_namespaced_resource::<MyCR>(client, "my-namespace", "my-resource").await?;
 /// # Ok(())
@@ -475,16 +416,13 @@ async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()>
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::NamespaceResourceScope;
+/// use kube::ResourceExt;
 /// use kube_genops::resources::make_object_refs;
-/// use serde::{Deserialize, Serialize};
+/// use kube_genops::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Clone + std::fmt::Debug + Send + Sync
-/// #         + Serialize + for<'de> Deserialize<'de> + 'static,
+/// #     MyCR: NamespacedResource,
 /// # {
 /// let refs = make_object_refs::<MyCR>(client, Some("my-namespace")).await?;
 /// # Ok(())
