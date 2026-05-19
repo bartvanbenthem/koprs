@@ -197,20 +197,57 @@ remove_finalizers::<MyCR, _>(
 ).await?;
 ```
 
-### Garbage collect orphaned resources
+### Garbage collection
+
+The library exposes three layers of functions for garbage collecting orphaned resources:
+
+| Function | Use when |
+|---|---|
+| `gc_namespaced_resources` | Your CRD is namespace-scoped (most common) |
+| `gc_cluster_resources` | Your CRD is cluster-scoped |
+| `gc_resources` | Scope is generic, or you need a custom predicate |
+
+The scoped wrappers take a `HashSet` of desired names. The generic form takes
+a predicate `Fn(&T) -> bool` instead, which lets you express any desired-set
+shape — including the `(namespace, name)` pairs needed for namespaced resources.
 
 ```rust
 use std::collections::HashSet;
-use kube_genops::gc::{gc_cluster_resources, gc_namespaced_resources};
-use k8s_openapi::api::core::v1::{PersistentVolume, PersistentVolumeClaim};
+use kube::ResourceExt;
+use kube_genops::gc::{gc_cluster_resources, gc_namespaced_resources, gc_resources};
+use kube_genops::scope::{Cluster, Namespaced};
 
-// Cluster-scoped — delete any PV labelled "app=my-operator" not in desired_names
-let desired = HashSet::from(["pv-a".to_string(), "pv-b".to_string()]);
-gc_cluster_resources::<PersistentVolume>(client.clone(), "app=my-operator", &desired).await?;
+// Namespace-scoped CRD (convenience wrapper)
+let desired = HashSet::from([
+    ("default".to_string(), "my-resource".to_string()),
+]);
+gc_namespaced_resources::<MyCR>(
+    client.clone(),
+    "app=my-operator",
+    &desired,
+).await?;
 
-// Namespaced — keyed on (namespace, name) pairs
-let desired = HashSet::from([("default".to_string(), "pvc-a".to_string())]);
-gc_namespaced_resources::<PersistentVolumeClaim>(client.clone(), "app=my-operator", &desired).await?;
+// Cluster-scoped CRD (convenience wrapper)
+let desired = HashSet::from(["my-resource".to_string()]);
+gc_cluster_resources::<MyCR>(
+    client.clone(),
+    "app=my-operator",
+    &desired,
+).await?;
+
+// Generic form — custom predicate, scope determined at runtime
+let desired: HashSet<(String, String)> = HashSet::from([
+    ("default".to_string(), "my-resource".to_string()),
+]);
+gc_resources::<MyCR, _>(
+    client.clone(),
+    Namespaced("default"),
+    "app=my-operator",
+    |r| {
+        let ns = r.namespace().unwrap_or_default();
+        desired.contains(&(ns, r.name_any()))
+    },
+).await?;
 ```
 
 ### Watch for changes

@@ -11,23 +11,176 @@ use serde_json::json;
 use tracing::info;
 
 use crate::error::Result;
+use crate::scope::ApiScope;
 
-/// Garbage collect orphaned cluster-scoped resources.
+// ---------------------------------------------------------------------------
+// Private core helper
+// ---------------------------------------------------------------------------
+
+/// Shared GC loop. Operates on a pre-built listing `Api<T>` and a
+/// per-resource `Api<T>` factory so it works for both cluster and namespaced
+/// resources without duplicating the loop body.
+///
+/// `is_desired` returns `true` for any resource that should be kept.
+async fn gc_inner<T, F>(
+    list_api: Api<T>,
+    make_api: impl Fn(&str) -> Api<T>,
+    label_selector: &str,
+    is_desired: F,
+) -> Result<()>
+where
+    T: Clone
+        + Debug
+        + Resource<DynamicType = ()>
+        + Metadata<Ty = ObjectMeta>
+        + DeserializeOwned
+        + Serialize
+        + Default
+        + Send
+        + Sync
+        + 'static,
+    F: Fn(&T) -> bool,
+{
+    let existing = list_api
+        .list(&ListParams::default().labels(label_selector))
+        .await?;
+
+    for resource in existing {
+        let name = resource.name_any();
+        let ns = resource.metadata().namespace.clone().unwrap_or_default();
+        let api = make_api(&ns);
+
+        if is_desired(&resource) {
+            continue;
+        }
+
+        if resource.metadata().deletion_timestamp.is_some() {
+            info!(%name, %ns, "Resource is terminating — clearing finalizers");
+            clear_finalizers(&api, &name).await;
+            continue;
+        }
+
+        info!(%name, %ns, "Deleting orphaned resource");
+        match api.delete(&name, &DeleteParams::foreground()).await {
+            Ok(_) => clear_finalizers(&api, &name).await,
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                info!(%name, "Already deleted, skipping");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Generic public API
+// ---------------------------------------------------------------------------
+
+/// Garbage collect orphaned Kubernetes resources.
+///
+/// Lists all resources of type `T` matching `label_selector` and deletes any
+/// for which `is_desired` returns `false`. Resources already in termination
+/// are unblocked by clearing their finalizers.
+///
+/// This generic form accepts any scope and a predicate so it can express both
+/// the cluster case (`name not in set`) and the namespaced case
+/// (`(namespace, name) not in set`) uniformly. Prefer
+/// [`gc_cluster_resources`] or [`gc_namespaced_resources`] when the scope and
+/// desired-set type are known at compile time.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::collections::HashSet;
+/// use kube::Client;
+/// use kube::Resource;
+/// use kube::ResourceExt;
+/// use k8s_openapi::{NamespaceResourceScope, Metadata};
+/// use kube::core::ObjectMeta;
+/// use kube_genops::gc::gc_resources;
+/// use kube_genops::scope::Namespaced;
+/// use serde::{Deserialize, Serialize};
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
+/// #         + Metadata<Ty = ObjectMeta>
+/// #         + Clone + std::fmt::Debug + Default + Send + Sync
+/// #         + Serialize + for<'de> Deserialize<'de> + 'static,
+/// # {
+/// let desired: HashSet<(String, String)> = HashSet::from([
+///     ("default".to_string(), "my-resource".to_string()),
+/// ]);
+/// gc_resources::<MyCR, _>(
+///     client,
+///     Namespaced("default"),
+///     "app=my-operator",
+///     |r| {
+///         let ns = r.namespace().unwrap_or_default();
+///         desired.contains(&(ns, r.name_any()))
+///     },
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn gc_resources<T, Scope>(
+    client: Client,
+    scope: Scope,
+    label_selector: &str,
+    is_desired: impl Fn(&T) -> bool,
+) -> Result<()>
+where
+    T: Clone
+        + Debug
+        + Resource<DynamicType = ()>
+        + Metadata<Ty = ObjectMeta>
+        + DeserializeOwned
+        + Serialize
+        + Default
+        + Send
+        + Sync
+        + 'static,
+    Scope: ApiScope<T>,
+{
+    let kind = T::kind(&());
+    info!(%kind, %label_selector, "Starting GC");
+
+    let list_api: Api<T> = Api::all(client.clone());
+    let scoped_api: Api<T> = scope.into_api(client);
+    gc_inner(
+        list_api,
+        |_ns| scoped_api.clone(),
+        label_selector,
+        is_desired,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — cluster-scoped
+// ---------------------------------------------------------------------------
+
+/// Garbage collect orphaned **cluster-scoped** resources.
 ///
 /// Lists all resources of type `T` matching `label_selector`. Any resource
 /// whose name is not in `desired_names` is deleted. Resources already in
 /// termination are unblocked by clearing their finalizers.
 ///
-/// # Example
+/// # Examples
+///
 /// ```no_run
 /// use std::collections::HashSet;
 /// use kube::Client;
-/// use kube_genops::gc::gc_cluster_resources;
 /// use k8s_openapi::api::core::v1::PersistentVolume;
 ///
 /// # async fn example(client: Client) -> anyhow::Result<()> {
 /// let desired = HashSet::from(["pv-a".to_string(), "pv-b".to_string()]);
-/// gc_cluster_resources::<PersistentVolume>(client, "app=my-operator", &desired).await?;
+/// kube_genops::gc::gc_cluster_resources::<PersistentVolume>(
+///     client,
+///     "app=my-operator",
+///     &desired,
+/// ).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -48,54 +201,45 @@ where
         + Sync
         + 'static,
 {
-    let api: Api<T> = Api::all(client);
-    let existing = api
-        .list(&ListParams::default().labels(label_selector))
-        .await?;
+    let kind = T::kind(&());
+    info!(%kind, %label_selector, "Starting cluster GC");
 
-    for resource in existing {
-        let name = resource.name_any();
-
-        if desired_names.contains(&name) {
-            continue;
-        }
-
-        if resource.metadata().deletion_timestamp.is_some() {
-            info!(%name, "Cluster resource is terminating — clearing finalizers");
-            clear_finalizers(&api, &name).await;
-            continue;
-        }
-
-        info!(%name, "Deleting orphaned cluster resource");
-        match api.delete(&name, &DeleteParams::foreground()).await {
-            Ok(_) => clear_finalizers(&api, &name).await,
-            Err(kube::Error::Api(e)) if e.code == 404 => {
-                info!(%name, "Already deleted, skipping");
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    Ok(())
+    let list_api: Api<T> = Api::all(client.clone());
+    gc_inner(
+        list_api,
+        |_ns| Api::all(client.clone()),
+        label_selector,
+        |r| desired_names.contains(&r.name_any()),
+    )
+    .await
 }
 
-/// Garbage collect orphaned namespaced resources across all namespaces.
+// ---------------------------------------------------------------------------
+// Convenience wrappers — namespaced
+// ---------------------------------------------------------------------------
+
+/// Garbage collect orphaned **namespace-scoped** resources across all namespaces.
 ///
 /// Lists all resources of type `T` matching `label_selector`. Any resource
 /// whose `(namespace, name)` pair is not in `desired_resources` is deleted.
+/// Resources already in termination are unblocked by clearing their finalizers.
 ///
-/// # Example
+/// # Examples
+///
 /// ```no_run
 /// use std::collections::HashSet;
 /// use kube::Client;
-/// use kube_genops::gc::gc_namespaced_resources;
 /// use k8s_openapi::api::core::v1::PersistentVolumeClaim;
 ///
 /// # async fn example(client: Client) -> anyhow::Result<()> {
 /// let desired = HashSet::from([
 ///     ("default".to_string(), "pvc-a".to_string()),
 /// ]);
-/// gc_namespaced_resources::<PersistentVolumeClaim>(client, "app=my-operator", &desired).await?;
+/// kube_genops::gc::gc_namespaced_resources::<PersistentVolumeClaim>(
+///     client,
+///     "app=my-operator",
+///     &desired,
+/// ).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -116,39 +260,25 @@ where
         + Sync
         + 'static,
 {
-    let api: Api<T> = Api::all(client.clone());
-    let existing = api
-        .list(&ListParams::default().labels(label_selector))
-        .await?;
+    let kind = T::kind(&());
+    info!(%kind, %label_selector, "Starting namespaced GC");
 
-    for resource in existing {
-        let name = resource.name_any();
-        let ns = resource.metadata().namespace.clone().unwrap_or_default();
-
-        if desired_resources.contains(&(ns.clone(), name.clone())) {
-            continue;
-        }
-
-        let ns_api: Api<T> = Api::namespaced(client.clone(), &ns);
-
-        if resource.metadata().deletion_timestamp.is_some() {
-            info!(%name, %ns, "Namespaced resource is terminating — clearing finalizers");
-            clear_finalizers(&ns_api, &name).await;
-            continue;
-        }
-
-        info!(%name, %ns, "Deleting orphaned namespaced resource");
-        match ns_api.delete(&name, &DeleteParams::foreground()).await {
-            Ok(_) => clear_finalizers(&ns_api, &name).await,
-            Err(kube::Error::Api(e)) if e.code == 404 => continue,
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    Ok(())
+    let list_api: Api<T> = Api::all(client.clone());
+    gc_inner(
+        list_api,
+        |ns| Api::namespaced(client.clone(), ns),
+        label_selector,
+        |r| {
+            let ns = r.metadata().namespace.clone().unwrap_or_default();
+            desired_resources.contains(&(ns, r.name_any()))
+        },
+    )
+    .await
 }
 
-// --- Internal helpers ---
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
 /// Force-clear all finalizers on a resource to unblock stuck terminations.
 /// Errors are intentionally swallowed — the resource may already be gone.
