@@ -138,22 +138,63 @@ patch_status::<MyCR, _, _>(
 ```
 
 
-### Manage finalizers
+### Finalizers
+
+The library exposes three layers of functions for managing finalizers:
+
+| Function | Use when |
+|---|---|
+| `add_finalizer_namespaced` / `remove_finalizers_namespaced` | Your CRD is namespace-scoped (most common) |
+| `add_finalizer_cluster` / `remove_finalizers_cluster` | Your CRD is cluster-scoped |
+| `add_finalizer` / `remove_finalizers` | Scope is generic or passed through from a caller |
 
 ```rust
 use kube_genops::finalizers::{
-    add_namespaced_finalizer, remove_namespaced_finalizers,
-    add_cluster_finalizer, remove_cluster_finalizers,
+    add_finalizer, add_finalizer_cluster, add_finalizer_namespaced,
+    remove_finalizers, remove_finalizers_cluster, remove_finalizers_namespaced,
 };
-use k8s_openapi::api::core::v1::{ConfigMap, PersistentVolume};
 
-// Add
-add_namespaced_finalizer::<ConfigMap>(client.clone(), "my-ns", "my-cm", "my-operator/finalizer").await?;
-add_cluster_finalizer::<PersistentVolume>(client.clone(), "my-pv", "my-operator/finalizer").await?;
+// Namespace-scoped CRD (convenience wrapper)
+add_finalizer_namespaced::<MyCR>(
+    client.clone(),
+    "my-namespace",
+    "my-resource",
+    "my-operator/cleanup",
+).await?;
 
-// Remove all
-remove_namespaced_finalizers::<ConfigMap>(client.clone(), "my-ns", "my-cm").await?;
-remove_cluster_finalizers::<PersistentVolume>(client.clone(), "my-pv").await?;
+remove_finalizers_namespaced::<MyCR>(
+    client.clone(),
+    "my-namespace",
+    "my-resource",
+).await?;
+
+// Cluster-scoped CRD (convenience wrapper)
+add_finalizer_cluster::<MyCR>(
+    client.clone(),
+    "my-resource",
+    "my-operator/cleanup",
+).await?;
+
+remove_finalizers_cluster::<MyCR>(
+    client.clone(),
+    "my-resource",
+).await?;
+
+// Generic form — when scope is determined at runtime or passed through
+use kube_genops::scope::{Cluster, Namespaced};
+
+add_finalizer::<MyCR, _>(
+    client.clone(),
+    Namespaced("my-namespace"),
+    "my-resource",
+    "my-operator/cleanup",
+).await?;
+
+remove_finalizers::<MyCR, _>(
+    client.clone(),
+    Cluster,
+    "my-resource",
+).await?;
 ```
 
 ### Garbage collect orphaned resources
