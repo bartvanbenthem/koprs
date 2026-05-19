@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::fmt::Debug;
 
 use k8s_openapi::{ClusterResourceScope, Metadata, NamespaceResourceScope};
@@ -11,7 +10,7 @@ use serde_json::json;
 use tracing::info;
 
 use crate::error::Result;
-use crate::scope::ApiScope;
+use crate::scope::{ApiScope, Cluster, Namespaced};
 
 // ---------------------------------------------------------------------------
 // Private core helper
@@ -71,6 +70,22 @@ where
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Force-clear all finalizers on a resource to unblock stuck terminations.
+/// Errors are intentionally swallowed — the resource may already be gone.
+async fn clear_finalizers<T>(api: &Api<T>, name: &str)
+where
+    T: Clone + Debug + Resource<DynamicType = ()> + DeserializeOwned + Send + Sync + 'static,
+{
+    let patch = json!({ "metadata": { "finalizers": null } });
+    let _ = api
+        .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,6 +190,7 @@ where
 /// ```no_run
 /// use std::collections::HashSet;
 /// use kube::Client;
+/// use kube::Resource;
 /// use k8s_openapi::api::core::v1::PersistentVolume;
 ///
 /// # async fn example(client: Client) -> anyhow::Result<()> {
@@ -182,7 +198,7 @@ where
 /// kube_genops::gc::gc_cluster_resources::<PersistentVolume>(
 ///     client,
 ///     "app=my-operator",
-///     &desired,
+///     |pv| desired.contains(pv.meta().name.as_deref().unwrap_or("")),
 /// ).await?;
 /// # Ok(())
 /// # }
@@ -190,7 +206,7 @@ where
 pub async fn gc_cluster_resources<T>(
     client: Client,
     label_selector: &str,
-    desired_names: &HashSet<String>,
+    is_desired: impl Fn(&T) -> bool,
 ) -> Result<()>
 where
     T: Clone
@@ -204,17 +220,7 @@ where
         + Sync
         + 'static,
 {
-    let kind = T::kind(&());
-    info!(%kind, %label_selector, "Starting cluster GC");
-
-    let list_api: Api<T> = Api::all(client.clone());
-    gc_inner(
-        list_api,
-        |_ns| Api::all(client.clone()),
-        label_selector,
-        |r| desired_names.contains(&r.name_any()),
-    )
-    .await
+    gc_resources::<T, _>(client, Cluster, label_selector, is_desired).await
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +242,7 @@ where
 /// ```no_run
 /// use std::collections::HashSet;
 /// use kube::Client;
+/// use kube::Resource;
 /// use k8s_openapi::api::core::v1::PersistentVolumeClaim;
 ///
 /// # async fn example(client: Client) -> anyhow::Result<()> {
@@ -244,16 +251,23 @@ where
 /// ]);
 /// kube_genops::gc::gc_namespaced_resources::<PersistentVolumeClaim>(
 ///     client,
+///     "default",
 ///     "app=my-operator",
-///     &desired,
+///     |pvc| {
+///         let meta = pvc.meta();
+///         let ns = meta.namespace.as_deref().unwrap_or("");
+///         let name = meta.name.as_deref().unwrap_or("");
+///         desired.contains(&(ns.to_string(), name.to_string()))
+///     },
 /// ).await?;
 /// # Ok(())
 /// # }
 /// ```
 pub async fn gc_namespaced_resources<T>(
     client: Client,
+    namespace: &str,
     label_selector: &str,
-    desired_resources: &HashSet<(String, String)>,
+    is_desired: impl Fn(&T) -> bool,
 ) -> Result<()>
 where
     T: Clone
@@ -267,34 +281,5 @@ where
         + Sync
         + 'static,
 {
-    let kind = T::kind(&());
-    info!(%kind, %label_selector, "Starting namespaced GC");
-
-    let list_api: Api<T> = Api::all(client.clone());
-    gc_inner(
-        list_api,
-        |ns| Api::namespaced(client.clone(), ns),
-        label_selector,
-        |r| {
-            let ns = r.metadata().namespace.clone().unwrap_or_default();
-            desired_resources.contains(&(ns, r.name_any()))
-        },
-    )
-    .await
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Force-clear all finalizers on a resource to unblock stuck terminations.
-/// Errors are intentionally swallowed — the resource may already be gone.
-async fn clear_finalizers<T>(api: &Api<T>, name: &str)
-where
-    T: Clone + Debug + Resource<DynamicType = ()> + DeserializeOwned + Send + Sync + 'static,
-{
-    let patch = json!({ "metadata": { "finalizers": null } });
-    let _ = api
-        .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await;
+    gc_resources::<T, _>(client, Namespaced(namespace), label_selector, is_desired).await
 }
