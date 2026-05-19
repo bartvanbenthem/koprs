@@ -95,28 +95,48 @@ let deleted = delete_namespaced_resource::<ConfigMap>(client.clone(), "my-ns", "
 
 ### Patch status
 
+The library exposes three functions depending on how much flexibility you need:
+
+| Function | Use when |
+|---|---|
+| `patch_status_namespaced` | Your CRD is namespace-scoped (most common) |
+| `patch_status_cluster` | Your CRD is cluster-scoped |
+| `patch_status` | Scope is generic or passed through from a caller |
+
 ```rust
-use kube_genops::scope::{Cluster, Namespaced};
-use kube_genops::status::patch_status;
+use kube_genops::status::{patch_status, patch_status_cluster, patch_status_namespaced};
 use serde::Serialize;
 
 #[derive(Serialize)]
 struct MyStatus { ready: bool, message: String }
 
-// Cluster-scoped CRD
-patch_status::<MyCR, _, _>(
-    client.clone(), Cluster, "my-resource",
+// Namespace-scoped CRD (convenience wrapper)
+patch_status_namespaced::<MyCR, _>(
+    client.clone(),
+    "my-namespace",
+    "my-resource",
     MyStatus { ready: true, message: "Reconciled".into() },
     "my-operator",
 ).await?;
 
-// Namespaced CRD
+// Cluster-scoped CRD (convenience wrapper)
+patch_status_cluster::<MyCR, _>(
+    client.clone(),
+    "my-resource",
+    MyStatus { ready: true, message: "Reconciled".into() },
+    "my-operator",
+).await?;
+
+// Generic form — when scope is determined at runtime or passed through
+use kube_genops::scope::{Cluster, Namespaced};
+
 patch_status::<MyCR, _, _>(
     client.clone(), Namespaced("my-namespace"), "my-resource",
     MyStatus { ready: true, message: "Reconciled".into() },
     "my-operator",
 ).await?;
 ```
+
 
 ### Manage finalizers
 
