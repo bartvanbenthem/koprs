@@ -34,6 +34,7 @@ pub mod gc;
 pub mod resources;
 pub mod scope;
 pub mod status;
+pub mod traits;
 pub mod watcher;
 
 pub use error::KubeGenericError;
