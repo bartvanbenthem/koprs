@@ -155,27 +155,27 @@ use kube_genops::finalizers::{
 };
 
 // Namespace-scoped CRD (convenience wrapper)
-add_finalizer_namespaced::<MyCR>(
+add_finalizer_namespaced::<Deployment>(
     client.clone(),
     "my-namespace",
     "my-resource",
     "my-operator/cleanup",
 ).await?;
 
-remove_finalizers_namespaced::<MyCR>(
+remove_finalizers_namespaced::<Deployment>(
     client.clone(),
     "my-namespace",
     "my-resource",
 ).await?;
 
 // Cluster-scoped CRD (convenience wrapper)
-add_finalizer_cluster::<MyCR>(
+add_finalizer_cluster::<Namespace>(
     client.clone(),
     "my-resource",
     "my-operator/cleanup",
 ).await?;
 
-remove_finalizers_cluster::<MyCR>(
+remove_finalizers_cluster::<Namespace>(
     client.clone(),
     "my-resource",
 ).await?;
@@ -183,14 +183,14 @@ remove_finalizers_cluster::<MyCR>(
 // Generic form — when scope is determined at runtime or passed through
 use kube_genops::scope::{Cluster, Namespaced};
 
-add_finalizer::<MyCR, _>(
+add_finalizer::<Deployment, _>(
     client.clone(),
     Namespaced("my-namespace"),
     "my-resource",
     "my-operator/cleanup",
 ).await?;
 
-remove_finalizers::<MyCR, _>(
+remove_finalizers::<Namespace, _>(
     client.clone(),
     Cluster,
     "my-resource",
@@ -205,11 +205,9 @@ The library exposes three layers of functions for garbage collecting orphaned re
 |---|---|
 | `gc_namespaced_resources` | Your CRD is namespace-scoped (most common) |
 | `gc_cluster_resources` | Your CRD is cluster-scoped |
-| `gc_resources` | Scope is generic, or you need a custom predicate |
+| `gc_resources` | Scope is generic, or you need a custom runtime scope |
 
-The scoped wrappers take a `HashSet` of desired names. The generic form takes
-a predicate `Fn(&T) -> bool` instead, which lets you express any desired-set
-shape — including the `(namespace, name)` pairs needed for namespaced resources.
+All three variations accept a predicate closure (`Fn(&T) -> bool`) that evaluates whether a given resource should be kept. Any resource matching the label selector for which the predicate returns `false` will be garbage collected.
 
 ```rust
 use std::collections::HashSet;
@@ -217,35 +215,42 @@ use kube::ResourceExt;
 use kube_genops::gc::{gc_cluster_resources, gc_namespaced_resources, gc_resources};
 use kube_genops::scope::{Cluster, Namespaced};
 
-// Namespace-scoped CRD (convenience wrapper)
-let desired = HashSet::from([
-    ("default".to_string(), "my-resource".to_string()),
+// 1. Namespace-scoped CRD (convenience wrapper)
+let desired_namespaced = HashSet::from([
+    ("default".to_string(), "my-resource-a".to_string()),
 ]);
-gc_namespaced_resources::<MyCR>(
+
+gc_namespaced_resources::<MyNamespacedCR>(
     client.clone(),
+    "default",
     "app=my-operator",
-    &desired,
+    |r| {
+        let ns = r.namespace().unwrap_or_default();
+        desired_namespaced.contains(&(ns, r.name_any()))
+    },
 ).await?;
 
-// Cluster-scoped CRD (convenience wrapper)
-let desired = HashSet::from(["my-resource".to_string()]);
-gc_cluster_resources::<MyCR>(
+// 2. Cluster-scoped CRD (convenience wrapper)
+let desired_cluster = HashSet::from(["my-cluster-resource".to_string()]);
+
+gc_cluster_resources::<MyClusterCR>(
     client.clone(),
     "app=my-operator",
-    &desired,
+    |r| desired_cluster.contains(&r.name_any()),
 ).await?;
 
-// Generic form — custom predicate, scope determined at runtime
-let desired: HashSet<(String, String)> = HashSet::from([
-    ("default".to_string(), "my-resource".to_string()),
+// 3. Generic form — scope determined explicitly at runtime
+let desired_generic = HashSet::from([
+    ("default".to_string(), "my-resource-b".to_string()),
 ]);
-gc_resources::<MyCR, _>(
+
+gc_resources::<MyNamespacedCR, _>(
     client.clone(),
     Namespaced("default"),
     "app=my-operator",
     |r| {
         let ns = r.namespace().unwrap_or_default();
-        desired.contains(&(ns, r.name_any()))
+        desired_generic.contains(&(ns, r.name_any()))
     },
 ).await?;
 ```
