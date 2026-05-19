@@ -9,7 +9,7 @@ use serde_json::json;
 use tracing::info;
 
 use crate::error::Result;
-use crate::scope::ApiScope;
+use crate::scope::{ApiScope, Cluster, Namespaced};
 
 // ---------------------------------------------------------------------------
 // Private core helpers
@@ -34,7 +34,8 @@ where
 ///
 /// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
 /// correct API surface at compile time. Prefer [`add_finalizer_namespaced`]
-/// or [`add_finalizer_cluster`] for the common cases.
+/// or [`add_finalizer_cluster`] for the common cases — they are thin wrappers
+/// around this function.
 ///
 /// # Examples
 ///
@@ -82,7 +83,8 @@ where
 ///
 /// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
 /// correct API surface at compile time. Prefer [`remove_finalizers_namespaced`]
-/// or [`remove_finalizers_cluster`] for the common cases.
+/// or [`remove_finalizers_cluster`] for the common cases — they are thin
+/// wrappers around this function.
 ///
 /// # Examples
 ///
@@ -127,9 +129,10 @@ where
 
 /// Add a finalizer to a **namespace-scoped** resource.
 ///
-/// Convenience wrapper around [`add_finalizer`] that fixes the scope to
-/// [`Namespaced`]. The resource type `T` must implement
-/// `Resource<Scope = NamespaceResourceScope>`.
+/// Delegates to [`add_finalizer`] with [`Namespaced`] as the scope. The
+/// resource type `T` must implement `Resource<Scope = NamespaceResourceScope>`,
+/// which the compiler enforces — passing a cluster-scoped type is a compile
+/// error.
 ///
 /// # Examples
 ///
@@ -142,7 +145,7 @@ where
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
 /// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Clone + std::fmt::Debug + for<'de> serde::Deserialize<'de> + 'static,
+/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
 /// # {
 /// add_finalizer_namespaced::<MyCR>(
 ///     client,
@@ -160,18 +163,16 @@ pub async fn add_finalizer_namespaced<T>(
     finalizer: &str,
 ) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = (), Scope = NamespaceResourceScope> + DeserializeOwned + 'static,
+    T: Clone + Debug + Resource<DynamicType = (), Scope = NamespaceResourceScope> + Serialize + DeserializeOwned + 'static,
 {
-    let kind = T::kind(&());
-    info!(%kind, %name, %namespace, %finalizer, "Adding finalizer");
-    let patch = json!({ "metadata": { "finalizers": [finalizer] } });
-    apply_finalizer_patch(Api::namespaced(client, namespace), name, patch).await
+    add_finalizer::<T, _>(client, Namespaced(namespace), name, finalizer).await
 }
 
 /// Remove all finalizers from a **namespace-scoped** resource.
 ///
-/// Convenience wrapper around [`remove_finalizers`] that fixes the scope to
-/// [`Namespaced`]. Sets `metadata.finalizers` to `null`, unblocking deletion.
+/// Delegates to [`remove_finalizers`] with [`Namespaced`] as the scope. Sets
+/// `metadata.finalizers` to `null`, unblocking deletion. The resource type
+/// `T` must implement `Resource<Scope = NamespaceResourceScope>`.
 ///
 /// # Examples
 ///
@@ -184,7 +185,7 @@ where
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
 /// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Clone + std::fmt::Debug + for<'de> serde::Deserialize<'de> + 'static,
+/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
 /// # {
 /// remove_finalizers_namespaced::<MyCR>(
 ///     client,
@@ -200,12 +201,9 @@ pub async fn remove_finalizers_namespaced<T>(
     name: &str,
 ) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = (), Scope = NamespaceResourceScope> + DeserializeOwned + 'static,
+    T: Clone + Debug + Resource<DynamicType = (), Scope = NamespaceResourceScope> + Serialize + DeserializeOwned + 'static,
 {
-    let kind = T::kind(&());
-    info!(%kind, %name, %namespace, "Removing all finalizers");
-    let patch = json!({ "metadata": { "finalizers": null } });
-    apply_finalizer_patch(Api::namespaced(client, namespace), name, patch).await
+    remove_finalizers::<T, _>(client, Namespaced(namespace), name).await
 }
 
 // ---------------------------------------------------------------------------
@@ -214,9 +212,9 @@ where
 
 /// Add a finalizer to a **cluster-scoped** resource.
 ///
-/// Convenience wrapper around [`add_finalizer`] that fixes the scope to
-/// [`Cluster`]. The resource type `T` must implement
-/// `Resource<Scope = ClusterResourceScope>`.
+/// Delegates to [`add_finalizer`] with [`Cluster`] as the scope. The resource
+/// type `T` must implement `Resource<Scope = ClusterResourceScope>`, which the
+/// compiler enforces — passing a namespace-scoped type is a compile error.
 ///
 /// # Examples
 ///
@@ -229,7 +227,7 @@ where
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
 /// #     MyCR: Resource<DynamicType = (), Scope = ClusterResourceScope>
-/// #         + Clone + std::fmt::Debug + for<'de> serde::Deserialize<'de> + 'static,
+/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
 /// # {
 /// add_finalizer_cluster::<MyCR>(
 ///     client,
@@ -245,18 +243,16 @@ pub async fn add_finalizer_cluster<T>(
     finalizer: &str,
 ) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = (), Scope = ClusterResourceScope> + DeserializeOwned + 'static,
+    T: Clone + Debug + Resource<DynamicType = (), Scope = ClusterResourceScope> + Serialize + DeserializeOwned + 'static,
 {
-    let kind = T::kind(&());
-    info!(%kind, %name, %finalizer, "Adding cluster finalizer");
-    let patch = json!({ "metadata": { "finalizers": [finalizer] } });
-    apply_finalizer_patch(Api::all(client), name, patch).await
+    add_finalizer::<T, _>(client, Cluster, name, finalizer).await
 }
 
 /// Remove all finalizers from a **cluster-scoped** resource.
 ///
-/// Convenience wrapper around [`remove_finalizers`] that fixes the scope to
-/// [`Cluster`]. Sets `metadata.finalizers` to `null`, unblocking deletion.
+/// Delegates to [`remove_finalizers`] with [`Cluster`] as the scope. Sets
+/// `metadata.finalizers` to `null`, unblocking deletion. The resource type
+/// `T` must implement `Resource<Scope = ClusterResourceScope>`.
 ///
 /// # Examples
 ///
@@ -269,7 +265,7 @@ where
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
 /// #     MyCR: Resource<DynamicType = (), Scope = ClusterResourceScope>
-/// #         + Clone + std::fmt::Debug + for<'de> serde::Deserialize<'de> + 'static,
+/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
 /// # {
 /// remove_finalizers_cluster::<MyCR>(
 ///     client,
@@ -283,10 +279,7 @@ pub async fn remove_finalizers_cluster<T>(
     name: &str,
 ) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = (), Scope = ClusterResourceScope> + DeserializeOwned + 'static,
+    T: Clone + Debug + Resource<DynamicType = (), Scope = ClusterResourceScope> + DeserializeOwned + Serialize + 'static,
 {
-    let kind = T::kind(&());
-    info!(%kind, %name, "Removing all cluster finalizers");
-    let patch = json!({ "metadata": { "finalizers": null } });
-    apply_finalizer_patch(Api::all(client), name, patch).await
+    remove_finalizers::<T, _>(client, Cluster, name).await
 }

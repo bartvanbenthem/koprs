@@ -163,9 +163,12 @@ where
 
 /// Garbage collect orphaned **cluster-scoped** resources.
 ///
-/// Lists all resources of type `T` matching `label_selector`. Any resource
-/// whose name is not in `desired_names` is deleted. Resources already in
-/// termination are unblocked by clearing their finalizers.
+/// Delegates to the shared GC loop with `Api::all` and a name-based predicate.
+/// Any resource whose name is not in `desired_names` is deleted. Resources
+/// already in termination are unblocked by clearing their finalizers.
+///
+/// Prefer this over [`gc_resources`] when the scope and desired-set type are
+/// known at compile time.
 ///
 /// # Examples
 ///
@@ -220,9 +223,13 @@ where
 
 /// Garbage collect orphaned **namespace-scoped** resources across all namespaces.
 ///
-/// Lists all resources of type `T` matching `label_selector`. Any resource
-/// whose `(namespace, name)` pair is not in `desired_resources` is deleted.
-/// Resources already in termination are unblocked by clearing their finalizers.
+/// Delegates to the shared GC loop with `Api::namespaced` per resource and a
+/// `(namespace, name)` predicate. Any resource whose pair is not in
+/// `desired_resources` is deleted. Resources already in termination are
+/// unblocked by clearing their finalizers.
+///
+/// Prefer this over [`gc_resources`] when the scope and desired-set type are
+/// known at compile time.
 ///
 /// # Examples
 ///
