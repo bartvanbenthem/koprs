@@ -1,8 +1,8 @@
+use k8s_openapi::{ClusterResourceScope, Metadata, NamespaceResourceScope};
 use kube::Resource;
 use kube::core::ObjectMeta;
-use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope, Metadata};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 
 /// Core Kubernetes resource abstraction used across `kube-genops`.
@@ -55,8 +55,7 @@ pub trait KubeResource:
 {
 }
 
-impl<T> KubeResource for T
-where
+impl<T> KubeResource for T where
     T: Clone
         + Debug
         + Resource<DynamicType = ()>
@@ -65,7 +64,7 @@ where
         + Serialize
         + Send
         + Sync
-        + 'static,
+        + 'static
 {
 }
 
@@ -101,11 +100,7 @@ where
 {
 }
 
-impl<T> NamespacedResource for T
-where
-    T: KubeResource + Resource<Scope = NamespaceResourceScope>,
-{
-}
+impl<T> NamespacedResource for T where T: KubeResource + Resource<Scope = NamespaceResourceScope> {}
 
 /// Marker trait for Kubernetes resources that are **cluster-scoped**.
 ///
@@ -137,8 +132,4 @@ where
 {
 }
 
-impl<T> ClusterResource for T
-where
-    T: KubeResource + Resource<Scope = ClusterResourceScope>,
-{
-}
+impl<T> ClusterResource for T where T: KubeResource + Resource<Scope = ClusterResourceScope> {}
