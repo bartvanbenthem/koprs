@@ -3,8 +3,8 @@ use std::fmt::Debug;
 use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope};
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client, Resource};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use tracing::info;
 
@@ -108,11 +108,7 @@ where
 /// # Ok(())
 /// # }
 /// ```
-pub async fn remove_finalizers<T, Scope>(
-    client: Client,
-    scope: Scope,
-    name: &str,
-) -> Result<T>
+pub async fn remove_finalizers<T, Scope>(client: Client, scope: Scope, name: &str) -> Result<T>
 where
     T: Clone + Debug + Resource<DynamicType = ()> + DeserializeOwned + Serialize + 'static,
     Scope: ApiScope<T>,
@@ -163,7 +159,12 @@ pub async fn add_finalizer_namespaced<T>(
     finalizer: &str,
 ) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = (), Scope = NamespaceResourceScope> + Serialize + DeserializeOwned + 'static,
+    T: Clone
+        + Debug
+        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
+        + Serialize
+        + DeserializeOwned
+        + 'static,
 {
     add_finalizer::<T, _>(client, Namespaced(namespace), name, finalizer).await
 }
@@ -201,7 +202,12 @@ pub async fn remove_finalizers_namespaced<T>(
     name: &str,
 ) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = (), Scope = NamespaceResourceScope> + Serialize + DeserializeOwned + 'static,
+    T: Clone
+        + Debug
+        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
+        + Serialize
+        + DeserializeOwned
+        + 'static,
 {
     remove_finalizers::<T, _>(client, Namespaced(namespace), name).await
 }
@@ -237,13 +243,14 @@ where
 /// # Ok(())
 /// # }
 /// ```
-pub async fn add_finalizer_cluster<T>(
-    client: Client,
-    name: &str,
-    finalizer: &str,
-) -> Result<T>
+pub async fn add_finalizer_cluster<T>(client: Client, name: &str, finalizer: &str) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = (), Scope = ClusterResourceScope> + Serialize + DeserializeOwned + 'static,
+    T: Clone
+        + Debug
+        + Resource<DynamicType = (), Scope = ClusterResourceScope>
+        + Serialize
+        + DeserializeOwned
+        + 'static,
 {
     add_finalizer::<T, _>(client, Cluster, name, finalizer).await
 }
@@ -274,12 +281,14 @@ where
 /// # Ok(())
 /// # }
 /// ```
-pub async fn remove_finalizers_cluster<T>(
-    client: Client,
-    name: &str,
-) -> Result<T>
+pub async fn remove_finalizers_cluster<T>(client: Client, name: &str) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = (), Scope = ClusterResourceScope> + DeserializeOwned + Serialize + 'static,
+    T: Clone
+        + Debug
+        + Resource<DynamicType = (), Scope = ClusterResourceScope>
+        + DeserializeOwned
+        + Serialize
+        + 'static,
 {
     remove_finalizers::<T, _>(client, Cluster, name).await
 }

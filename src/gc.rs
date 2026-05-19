@@ -4,8 +4,8 @@ use k8s_openapi::{ClusterResourceScope, Metadata, NamespaceResourceScope};
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
 use kube::core::ObjectMeta;
 use kube::{Api, Client, Resource, ResourceExt};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use tracing::info;
 

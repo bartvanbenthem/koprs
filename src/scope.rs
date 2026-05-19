@@ -28,8 +28,8 @@
 
 use k8s_openapi::NamespaceResourceScope;
 use kube::{Api, Client, Resource};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// Marker type for cluster-scoped resources.
 ///

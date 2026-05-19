@@ -5,7 +5,7 @@ use k8s_openapi::Metadata;
 use kube::core::ObjectMeta;
 use kube::{Api, Client, Resource, ResourceExt};
 use kube_runtime::WatchStreamExt;
-use kube_runtime::watcher::{watcher, Config};
+use kube_runtime::watcher::{Config, watcher};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{error, info};

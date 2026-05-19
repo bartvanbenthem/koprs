@@ -32,9 +32,9 @@ pub mod error;
 pub mod finalizers;
 pub mod gc;
 pub mod resources;
+pub mod scope;
 pub mod status;
 pub mod watcher;
-pub mod scope;
 
 pub use error::KubeGenericError;
 

@@ -1,12 +1,12 @@
-use kube::api::{Patch, PatchParams};
-use kube::{Api, Client, Resource};
-use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use serde_json::json;
-use tracing::info;
 use crate::error::Result;
 use crate::scope::{ApiScope, Cluster, Namespaced};
+use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope};
+use kube::api::{Patch, PatchParams};
+use kube::{Api, Client, Resource};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use serde_json::json;
+use tracing::info;
 
 // ---------------------------------------------------------------------------
 // Private core helper
@@ -30,7 +30,9 @@ where
         "status": status,
     });
     let params = PatchParams::apply(field_manager).force();
-    Ok(api.patch_status(name, &params, &Patch::Apply(&patch)).await?)
+    Ok(api
+        .patch_status(name, &params, &Patch::Apply(&patch))
+        .await?)
 }
 
 // ---------------------------------------------------------------------------

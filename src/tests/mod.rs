@@ -63,7 +63,7 @@ mod tests {
         let existing = vec![
             ("default".to_string(), "pvc-a".to_string()),
             ("default".to_string(), "pvc-b".to_string()),
-            ("prod".to_string(),    "pvc-c".to_string()),
+            ("prod".to_string(), "pvc-c".to_string()),
         ];
         let desired: HashSet<(String, String)> =
             [("default".to_string(), "pvc-a".to_string())].into();
@@ -75,18 +75,18 @@ mod tests {
 
         assert_eq!(orphaned.len(), 2);
         assert!(orphaned.contains(&("default".to_string(), "pvc-b".to_string())));
-        assert!(orphaned.contains(&("prod".to_string(),    "pvc-c".to_string())));
+        assert!(orphaned.contains(&("prod".to_string(), "pvc-c".to_string())));
     }
 
     #[test]
     fn gc_namespaced_no_orphans_when_all_desired() {
         let existing = vec![
             ("default".to_string(), "pvc-a".to_string()),
-            ("prod".to_string(),    "pvc-b".to_string()),
+            ("prod".to_string(), "pvc-b".to_string()),
         ];
         let desired: HashSet<(String, String)> = [
             ("default".to_string(), "pvc-a".to_string()),
-            ("prod".to_string(),    "pvc-b".to_string()),
+            ("prod".to_string(), "pvc-b".to_string()),
         ]
         .into();
 
@@ -103,7 +103,7 @@ mod tests {
         // "pvc-a" in "default" is desired; "pvc-a" in "prod" is not.
         let existing = vec![
             ("default".to_string(), "pvc-a".to_string()),
-            ("prod".to_string(),    "pvc-a".to_string()),
+            ("prod".to_string(), "pvc-a".to_string()),
         ];
         let desired: HashSet<(String, String)> =
             [("default".to_string(), "pvc-a".to_string())].into();
