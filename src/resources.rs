@@ -1,18 +1,16 @@
 use std::collections::HashSet;
-use std::fmt::Debug;
 use std::path::Path;
 
 use k8s_openapi::api::core::v1::Namespace;
-use k8s_openapi::{ClusterResourceScope, Metadata, NamespaceResourceScope};
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams};
 use kube::core::ObjectMeta;
 use kube::{Api, Client, Resource, ResourceExt};
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use tracing::info;
 
 use crate::error::{KubeGenericError, Result};
 use crate::scope::{ApiScope, Cluster, Namespaced};
+use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
 // ---------------------------------------------------------------------------
 // Namespace
@@ -55,13 +53,7 @@ pub async fn ensure_namespace(
 
 async fn apply_resource_inner<T>(api: Api<T>, resource: &T, field_manager: &str) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + 'static,
+    T: KubeResource,
 {
     let name = resource.metadata().name.as_deref().unwrap_or("[unnamed]");
     let kind = T::kind(&());
@@ -72,7 +64,7 @@ where
 
 async fn delete_resource_inner<T>(api: Api<T>, name: &str) -> Result<bool>
 where
-    T: Clone + Debug + Resource<DynamicType = ()> + DeserializeOwned + 'static,
+    T: KubeResource,
 {
     let kind = T::kind(&());
     info!(%kind, %name, "Deleting resource");
@@ -128,16 +120,7 @@ pub async fn apply_resource<T, Scope>(
     field_manager: &str,
 ) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
     Scope: ApiScope<T>,
 {
     apply_resource_inner(scope.into_api(client), resource, field_manager).await
@@ -184,14 +167,7 @@ where
 /// ```
 pub async fn delete_resource<T, Scope>(client: Client, scope: Scope, name: &str) -> Result<bool>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + DeserializeOwned
-        + Serialize
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
     Scope: ApiScope<T>,
 {
     delete_resource_inner(scope.into_api(client), name).await
@@ -234,16 +210,7 @@ pub async fn apply_cluster_resource<T>(
     field_manager: &str,
 ) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = ClusterResourceScope>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    T: ClusterResource,
 {
     apply_resource::<T, _>(client, Cluster, resource, field_manager).await
 }
@@ -275,13 +242,7 @@ where
 /// ```
 pub async fn delete_cluster_resource<T>(client: Client, name: &str) -> Result<bool>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = ClusterResourceScope>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: ClusterResource,
 {
     delete_resource_inner(Api::<T>::all(client), name).await
 }
@@ -325,16 +286,7 @@ pub async fn apply_namespaced_resource<T>(
     field_manager: &str,
 ) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    T: NamespacedResource,
 {
     apply_resource::<T, _>(client, Namespaced(namespace), resource, field_manager).await
 }
@@ -370,13 +322,7 @@ pub async fn delete_namespaced_resource<T>(
     name: &str,
 ) -> Result<bool>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: NamespacedResource,
 {
     delete_resource_inner(Api::<T>::namespaced(client, namespace), name).await
 }
@@ -401,14 +347,7 @@ where
 /// ```
 pub async fn list_resources<T>(client: Client) -> Result<ObjectList<T>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
     let api: Api<T> = Api::all(client);
     Ok(api.list(&Default::default()).await?)
@@ -433,14 +372,7 @@ pub async fn list_resources_by_label<T>(
     label_selector: &str,
 ) -> Result<ObjectList<T>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
     let api: Api<T> = Api::all(client);
     let lp = ListParams::default().labels(label_selector);
@@ -463,14 +395,7 @@ where
 /// ```
 pub async fn list_namespaced_resources<T>(client: Client, namespace: &str) -> Result<ObjectList<T>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: NamespacedResource,
 {
     let api: Api<T> = Api::namespaced(client, namespace);
     Ok(api.list(&Default::default()).await?)
@@ -493,14 +418,7 @@ where
 /// ```
 pub async fn list_resource_names<T>(client: Client, label_selector: &str) -> Result<HashSet<String>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
     let list = list_resources_by_label::<T>(client, label_selector).await?;
     Ok(list.items.iter().map(|r| r.name_any()).collect())
@@ -526,15 +444,7 @@ where
 /// ```
 pub async fn fetch_and_write_to_file<T>(client: Client, path: &str, file_name: &str) -> Result<()>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
     let file_path = Path::new(path).join(file_name);
     let file_str = file_path
@@ -585,14 +495,7 @@ pub async fn make_object_refs<T>(
     namespace: Option<&str>,
 ) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + DeserializeOwned
-        + Serialize
-        + Send
-        + Sync
-        + 'static,
+    T: NamespacedResource,
 {
     let api: Api<T> = match namespace {
         Some(ns) => Api::namespaced(client, ns),
