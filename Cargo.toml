@@ -1,6 +1,6 @@
 [package]
 name = "kube-genops"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Generic Kubernetes resource operations for Rust operators"
 license = "MIT"
