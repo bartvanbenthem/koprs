@@ -407,6 +407,51 @@ async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()>
 // ObjectRef helpers
 // ---------------------------------------------------------------------------
 
+/// Generate `ObjectRef`s for all instances of a cluster-scoped resource type.
+///
+/// Useful for setting up watched relations in `kube-runtime` controllers
+/// where the watched resource is cluster-scoped (e.g. `Node`,
+/// `PersistentVolume`, `ClusterRole`).
+///
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube::ResourceExt;
+/// use kube_genops::resources::make_cluster_object_refs;
+/// use kube_genops::traits::ClusterResource;
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: ClusterResource,
+/// # {
+/// let refs = make_cluster_object_refs::<MyCR>(client).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn make_cluster_object_refs<T>(
+    client: Client,
+) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+where
+    T: ClusterResource,
+{
+    let api: Api<T> = Api::all(client);
+    let resources = api.list(&Default::default()).await?;
+    let mut refs = Vec::new();
+    for resource in resources.items {
+        let name = resource
+            .meta()
+            .name
+            .clone()
+            .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))?;
+        info!(%name, "Building ObjectRef");
+        refs.push(kube_runtime::reflector::ObjectRef::new(&name));
+    }
+    Ok(refs)
+}
+
 /// Generate `ObjectRef`s for all instances of a namespaced resource type.
 ///
 /// Useful for setting up watched relations in `kube-runtime` controllers.
@@ -417,18 +462,18 @@ async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()>
 /// ```no_run
 /// use kube::Client;
 /// use kube::ResourceExt;
-/// use kube_genops::resources::make_object_refs;
+/// use kube_genops::resources::make_namespaced_object_refs;
 /// use kube_genops::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
 /// #     MyCR: NamespacedResource,
 /// # {
-/// let refs = make_object_refs::<MyCR>(client, Some("my-namespace")).await?;
+/// let refs = make_namespaced_object_refs::<MyCR>(client, Some("my-namespace")).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn make_object_refs<T>(
+pub async fn make_namespaced_object_refs<T>(
     client: Client,
     namespace: Option<&str>,
 ) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
