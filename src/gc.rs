@@ -161,6 +161,7 @@ where
 /// ```no_run
 /// use std::collections::HashSet;
 /// use kube::Client;
+/// use kube::Resource;
 /// use k8s_openapi::api::core::v1::PersistentVolume;
 ///
 /// # async fn example(client: Client) -> anyhow::Result<()> {
@@ -206,6 +207,7 @@ where
 /// ```no_run
 /// use std::collections::HashSet;
 /// use kube::Client;
+/// use kube::Resource;
 /// use k8s_openapi::api::core::v1::PersistentVolumeClaim;
 ///
 /// # async fn example(client: Client) -> anyhow::Result<()> {
