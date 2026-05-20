@@ -325,6 +325,57 @@ while let Some(()) = rx.recv().await {
 }
 ```
 
+### Resources — Polling
+
+The library exposes three layers of functions for polling until resources exist:
+
+| Function | Use when |
+|---|---|
+| `wait_for_resources_namespaced` | Your CRD is namespace-scoped (most common) |
+| `wait_for_resources_cluster` | Your CRD is cluster-scoped |
+| `wait_for_resources` | Scope is generic or passed through from a caller |
+
+```rust
+use kube_genops::resources::{
+    wait_for_resources, wait_for_resources_cluster, wait_for_resources_namespaced,
+};
+use std::time::Duration;
+
+// Namespace-scoped CRD (convenience wrapper)
+let resources = wait_for_resources_namespaced::<Deployment>(
+    client.clone(),
+    "my-namespace",
+    Duration::from_secs(10),
+).await?;
+
+// Cluster-scoped CRD (convenience wrapper)
+let resources = wait_for_resources_cluster::<Namespace>(
+    client.clone(),
+    Duration::from_secs(10),
+).await?;
+
+// Generic form — when scope is determined at runtime or passed through
+use kube_genops::scope::{Cluster, Namespaced};
+
+let resources = wait_for_resources::<Deployment, _>(
+    client.clone(),
+    Namespaced("my-namespace"),
+    Duration::from_secs(10),
+).await?;
+
+let resources = wait_for_resources::<Namespace, _>(
+    client.clone(),
+    Cluster,
+    Duration::from_secs(10),
+).await?;
+
+// Cardinality policy stays in your operator — the library returns Vec<T>
+match resources.len() {
+    1 => { /* exactly one CR, proceed */ }
+    n => { /* zero is unreachable here; handle n > 1 as your domain requires */ }
+}
+```
+
 ### List resources
 
 ```rust
