@@ -14,7 +14,11 @@ use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 // Private core helpers
 // ---------------------------------------------------------------------------
 
-async fn spawn_watcher<T>(api: Api<T>, config: Config, tx: mpsc::Sender<()>) -> Result<JoinHandle<()>>
+async fn spawn_watcher<T>(
+    api: Api<T>,
+    config: Config,
+    tx: mpsc::Sender<()>,
+) -> Result<JoinHandle<()>>
 where
     T: KubeResource,
 {
@@ -93,13 +97,15 @@ where
 {
     let kind = T::kind(&());
     match label_selector {
-        Some(sel) => info!(%kind, label_selector = %sel, "Starting label-filtered resource watcher"),
-        None      => info!(%kind, "Starting resource watcher"),
+        Some(sel) => {
+            info!(%kind, label_selector = %sel, "Starting label-filtered resource watcher")
+        }
+        None => info!(%kind, "Starting resource watcher"),
     }
 
     let config = match label_selector {
         Some(sel) => Config::default().labels(sel),
-        None      => Config::default(),
+        None => Config::default(),
     };
 
     spawn_watcher(scope.into_api(client), config, tx).await
@@ -222,10 +228,7 @@ where
 /// # Ok(())
 /// # }
 /// ```
-pub async fn watch_cluster<T>(
-    client: Client,
-    tx: mpsc::Sender<()>,
-) -> Result<JoinHandle<()>>
+pub async fn watch_cluster<T>(client: Client, tx: mpsc::Sender<()>) -> Result<JoinHandle<()>>
 where
     T: ClusterResource,
 {

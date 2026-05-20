@@ -1,13 +1,13 @@
 use std::collections::HashSet;
-use std::time::Duration;
 use std::path::Path;
+use std::time::Duration;
 
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams};
 use kube::core::ObjectMeta;
 use kube::{Api, Client, Resource, ResourceExt};
 use serde::Serialize;
-use tracing::{info, error};
+use tracing::{error, info};
 
 use crate::error::{KubeGenericError, Result};
 use crate::scope::{ApiScope, Cluster, Namespaced};
@@ -491,10 +491,7 @@ where
 /// # Ok(())
 /// # }
 /// ```
-pub async fn wait_for_resources_cluster<T>(
-    client: Client,
-    interval: Duration,
-) -> Result<Vec<T>>
+pub async fn wait_for_resources_cluster<T>(client: Client, interval: Duration) -> Result<Vec<T>>
 where
     T: ClusterResource,
 {

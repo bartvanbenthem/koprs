@@ -1,16 +1,11 @@
-use std::fmt::Debug;
-
-use k8s_openapi::{ClusterResourceScope, Metadata, NamespaceResourceScope};
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
-use kube::core::ObjectMeta;
-use kube::{Api, Client, Resource, ResourceExt};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use kube::{Api, Client, ResourceExt};
 use serde_json::json;
 use tracing::info;
 
 use crate::error::Result;
 use crate::scope::{ApiScope, Cluster, Namespaced};
+use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
 // ---------------------------------------------------------------------------
 // Private core helper
@@ -28,16 +23,7 @@ async fn gc_inner<T, F>(
     is_desired: F,
 ) -> Result<()>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
     F: Fn(&T) -> bool,
 {
     let existing = list_api
@@ -80,7 +66,7 @@ where
 /// Errors are intentionally swallowed — the resource may already be gone.
 async fn clear_finalizers<T>(api: &Api<T>, name: &str)
 where
-    T: Clone + Debug + Resource<DynamicType = ()> + DeserializeOwned + Send + Sync + 'static,
+    T: KubeResource,
 {
     let patch = json!({ "metadata": { "finalizers": null } });
     let _ = api
@@ -109,21 +95,12 @@ where
 /// ```no_run
 /// use std::collections::HashSet;
 /// use kube::Client;
-/// use kube::Resource;
 /// use kube::ResourceExt;
-/// use k8s_openapi::{NamespaceResourceScope, Metadata};
-/// use kube::core::ObjectMeta;
 /// use kube_genops::gc::gc_resources;
 /// use kube_genops::scope::Namespaced;
-/// use serde::{Deserialize, Serialize};
+/// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Metadata<Ty = ObjectMeta>
-/// #         + Clone + std::fmt::Debug + Default + Send + Sync
-/// #         + Serialize + for<'de> Deserialize<'de> + 'static,
-/// # {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
 /// let desired: HashSet<(String, String)> = HashSet::from([
 ///     ("default".to_string(), "my-resource".to_string()),
 /// ]);
@@ -146,16 +123,7 @@ pub async fn gc_resources<T, Scope>(
     is_desired: impl Fn(&T) -> bool,
 ) -> Result<()>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
     Scope: ApiScope<T>,
 {
     let kind = T::kind(&());
@@ -182,6 +150,9 @@ where
 /// Any resource whose name is not in `desired_names` is deleted. Resources
 /// already in termination are unblocked by clearing their finalizers.
 ///
+/// The resource type `T` must implement [`ClusterResource`], which the
+/// compiler enforces — passing a namespace-scoped type is a compile error.
+///
 /// Prefer this over [`gc_resources`] when the scope and desired-set type are
 /// known at compile time.
 ///
@@ -190,7 +161,6 @@ where
 /// ```no_run
 /// use std::collections::HashSet;
 /// use kube::Client;
-/// use kube::Resource;
 /// use k8s_openapi::api::core::v1::PersistentVolume;
 ///
 /// # async fn example(client: Client) -> anyhow::Result<()> {
@@ -209,16 +179,7 @@ pub async fn gc_cluster_resources<T>(
     is_desired: impl Fn(&T) -> bool,
 ) -> Result<()>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = ClusterResourceScope>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    T: ClusterResource,
 {
     gc_resources::<T, _>(client, Cluster, label_selector, is_desired).await
 }
@@ -234,6 +195,9 @@ where
 /// `desired_resources` is deleted. Resources already in termination are
 /// unblocked by clearing their finalizers.
 ///
+/// The resource type `T` must implement [`NamespacedResource`], which the
+/// compiler enforces — passing a cluster-scoped type is a compile error.
+///
 /// Prefer this over [`gc_resources`] when the scope and desired-set type are
 /// known at compile time.
 ///
@@ -242,7 +206,6 @@ where
 /// ```no_run
 /// use std::collections::HashSet;
 /// use kube::Client;
-/// use kube::Resource;
 /// use k8s_openapi::api::core::v1::PersistentVolumeClaim;
 ///
 /// # async fn example(client: Client) -> anyhow::Result<()> {
@@ -270,16 +233,7 @@ pub async fn gc_namespaced_resources<T>(
     is_desired: impl Fn(&T) -> bool,
 ) -> Result<()>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    T: NamespacedResource,
 {
     gc_resources::<T, _>(client, Namespaced(namespace), label_selector, is_desired).await
 }
