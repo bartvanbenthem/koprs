@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::time::Duration;
 use std::path::Path;
 
 use k8s_openapi::api::core::v1::Namespace;
@@ -6,7 +7,7 @@ use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams};
 use kube::core::ObjectMeta;
 use kube::{Api, Client, Resource, ResourceExt};
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, error};
 
 use crate::error::{KubeGenericError, Result};
 use crate::scope::{ApiScope, Cluster, Namespaced};
@@ -401,6 +402,141 @@ async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()>
         .await
         .map_err(|e| anyhow::anyhow!("Failed to write file: {}", e))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Polling
+// ---------------------------------------------------------------------------
+
+/// Poll until at least one resource of type `T` exists, returning the full list.
+///
+/// Retries every `interval` on a healthy API returning zero results. On API
+/// errors the interval is doubled (capped at 60 s) before retrying. Returns
+/// as soon as one or more resources are found.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
+/// correct API surface at compile time. Prefer [`wait_for_resources_namespaced`]
+/// or [`wait_for_resources_cluster`] for the common cases — they are thin
+/// wrappers around this function.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::wait_for_resources;
+/// use kube_genops::scope::Namespaced;
+/// use kube_genops::traits::NamespacedResource;
+/// use std::time::Duration;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// let resources = wait_for_resources::<MyCR, _>(
+///     client,
+///     Namespaced("my-namespace"),
+///     Duration::from_secs(10),
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn wait_for_resources<T, Scope>(
+    client: Client,
+    scope: Scope,
+    interval: Duration,
+) -> Result<Vec<T>>
+where
+    T: KubeResource,
+    Scope: ApiScope<T> + Clone,
+{
+    let kind = T::kind(&());
+    info!(%kind, "Waiting for at least one resource");
+    loop {
+        let api: Api<T> = scope.clone().into_api(client.clone());
+        match api.list(&Default::default()).await {
+            Ok(list) if !list.items.is_empty() => {
+                info!(%kind, count = list.items.len(), "Resources found");
+                return Ok(list.items);
+            }
+            Ok(_) => {
+                info!(%kind, ?interval, "No resources found, retrying");
+                tokio::time::sleep(interval).await;
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                let backoff = interval.min(Duration::from_secs(60));
+                error!(%kind, code = 404, ?backoff, "CRD not found, retrying");
+                tokio::time::sleep(backoff).await;
+            }
+            Err(e) => {
+                let backoff = (interval * 2).min(Duration::from_secs(60));
+                error!(%kind, error = %e, ?backoff, "API error, retrying");
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
+/// Poll until at least one **namespace-scoped** resource of type `T` exists,
+/// returning the full list.
+///
+/// Delegates to [`wait_for_resources`] with [`Namespaced`] as the scope. The
+/// resource type `T` must implement [`NamespacedResource`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::wait_for_resources_namespaced;
+/// use kube_genops::traits::NamespacedResource;
+/// use std::time::Duration;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// let resources = wait_for_resources_namespaced::<MyCR>(
+///     client,
+///     "my-namespace",
+///     Duration::from_secs(10),
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn wait_for_resources_namespaced<T>(
+    client: Client,
+    namespace: &str,
+    interval: Duration,
+) -> Result<Vec<T>>
+where
+    T: NamespacedResource,
+{
+    wait_for_resources::<T, _>(client, Namespaced(namespace), interval).await
+}
+
+/// Poll until at least one **cluster-scoped** resource of type `T` exists,
+/// returning the full list.
+///
+/// Delegates to [`wait_for_resources`] with [`Cluster`] as the scope. The
+/// resource type `T` must implement [`ClusterResource`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::wait_for_resources_cluster;
+/// use kube_genops::traits::ClusterResource;
+/// use std::time::Duration;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()> {
+/// let resources = wait_for_resources_cluster::<MyCR>(
+///     client,
+///     Duration::from_secs(10),
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn wait_for_resources_cluster<T>(
+    client: Client,
+    interval: Duration,
+) -> Result<Vec<T>>
+where
+    T: ClusterResource,
+{
+    wait_for_resources::<T, _>(client, Cluster, interval).await
 }
 
 // ---------------------------------------------------------------------------

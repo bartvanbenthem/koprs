@@ -52,6 +52,7 @@ use serde::de::DeserializeOwned;
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone, Copy)]
 pub struct Cluster;
 
 /// Marker type for namespace-scoped resources, carrying the target namespace.
@@ -77,6 +78,7 @@ pub struct Cluster;
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone, Copy)]
 pub struct Namespaced<'a>(pub &'a str);
 
 mod private {
