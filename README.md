@@ -583,13 +583,6 @@ cargo test --features integration --test integration
 kind delete cluster --name kube-genops-test
 ```
 
-
----
-
-## Related
-
-- [`kube-objstore`](../kube-objstore) — object store client for Kubernetes operators
-
 ---
 
 ## License
