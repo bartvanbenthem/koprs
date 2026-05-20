@@ -100,6 +100,9 @@ where
     K: Resource + Clone + DeserializeOwned + Serialize + 'static,
     K::DynamicType: Default,
 {
+    /// Get the namespace name if this is a namespaced scope.
+    fn namespace(&self) -> Option<&str>;
+
     /// Consume this scope marker and produce the appropriate [`Api`] handle.
     fn into_api(self, client: Client) -> Api<K>;
 }
@@ -109,6 +112,10 @@ where
     K: Resource + Clone + DeserializeOwned + Serialize + 'static,
     K::DynamicType: Default,
 {
+    fn namespace(&self) -> Option<&str> {
+        None
+    }
+
     fn into_api(self, client: Client) -> Api<K> {
         Api::all(client)
     }
@@ -119,6 +126,10 @@ where
     K: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Serialize + 'static,
     K::DynamicType: Default,
 {
+    fn namespace(&self) -> Option<&str> {
+        Some(self.0)
+    }
+
     fn into_api(self, client: Client) -> Api<K> {
         Api::namespaced(client, self.0)
     }

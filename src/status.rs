@@ -86,7 +86,13 @@ where
 {
     let ctx = K::DynamicType::default();
     let kind = K::kind(&ctx);
-    info!(%kind, %name, "Patching status");
+
+    // Read the namespace out safely before consuming the scope
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching status"),
+        None => info!(%kind, %name, "Patching status"),
+    }
+
     apply_status_patch(scope.into_api(client), name, status, field_manager).await
 }
 

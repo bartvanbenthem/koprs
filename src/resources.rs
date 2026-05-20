@@ -57,8 +57,6 @@ where
     T: KubeResource,
 {
     let name = resource.metadata().name.as_deref().unwrap_or("[unnamed]");
-    let kind = T::kind(&());
-    info!(%kind, %name, "Applying resource");
     let params = PatchParams::apply(field_manager).force();
     Ok(api.patch(name, &params, &Patch::Apply(resource)).await?)
 }
@@ -67,8 +65,6 @@ async fn delete_resource_inner<T>(api: Api<T>, name: &str) -> Result<bool>
 where
     T: KubeResource,
 {
-    let kind = T::kind(&());
-    info!(%kind, %name, "Deleting resource");
     match api.delete(name, &DeleteParams::default()).await {
         Ok(_) => Ok(true),
         Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
@@ -115,6 +111,14 @@ where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
+    let name = resource.metadata().name.as_deref().unwrap_or("[unnamed]");
+    let kind = T::kind(&());
+
+    match scope.namespace() {
+        Some(namespace) => info!(%namespace, %kind, %name, "Applying resource"),
+        None => info!(%kind, %name, "Applying resource"),
+    }
+
     apply_resource_inner(scope.into_api(client), resource, field_manager).await
 }
 
@@ -149,6 +153,13 @@ where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
+    let kind = T::kind(&());
+
+    match scope.namespace() {
+        Some(namespace) => info!(%namespace, %kind, %name, "Deleting resource"),
+        None => info!(%kind, %name, "Deleting resource"),
+    }
+
     delete_resource_inner(scope.into_api(client), name).await
 }
 
@@ -409,7 +420,13 @@ where
     Scope: ApiScope<T> + Clone,
 {
     let kind = T::kind(&());
-    info!(%kind, "Waiting for at least one resource");
+    let namespace = scope.namespace();
+
+    match namespace {
+        Some(ns) => info!(namespace = %ns, %kind, "Waiting for at least one resource"),
+        None => info!(%kind, "Waiting for at least one resource"),
+    }
+
     loop {
         let api: Api<T> = scope.clone().into_api(client.clone());
         match api.list(&Default::default()).await {

@@ -65,7 +65,11 @@ where
     Scope: ApiScope<T>,
 {
     let kind = T::kind(&());
-    info!(%kind, %name, %finalizer, "Adding finalizer");
+    match scope.namespace() {
+        Some(namespace) => info!(%namespace, %kind, %name, %finalizer, "Adding finalizer"),
+        None => info!(%kind, %name, %finalizer, "Adding finalizer"),
+    }
+
     let patch = json!({ "metadata": { "finalizers": [finalizer] } });
     apply_finalizer_patch(scope.into_api(client), name, patch).await
 }
@@ -103,7 +107,11 @@ where
     Scope: ApiScope<T>,
 {
     let kind = T::kind(&());
-    info!(%kind, %name, "Removing all finalizers");
+    match scope.namespace() {
+        Some(namespace) => info!(%namespace, %kind, %name, "Removing all finalizers"),
+        None => info!(%kind, %name, "Removing all finalizers"),
+    }
+
     let patch = json!({ "metadata": { "finalizers": null } });
     apply_finalizer_patch(scope.into_api(client), name, patch).await
 }
