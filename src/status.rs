@@ -1,10 +1,9 @@
 use crate::error::Result;
 use crate::scope::{ApiScope, Cluster, Namespaced};
-use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope};
+use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 use kube::api::{Patch, PatchParams};
-use kube::{Api, Client, Resource};
+use kube::{Api, Client};
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::json;
 use tracing::info;
 
@@ -19,7 +18,7 @@ async fn apply_status_patch<K, S>(
     field_manager: &str,
 ) -> Result<K>
 where
-    K: Resource + Clone + DeserializeOwned + Serialize + 'static,
+    K: KubeResource,
     K::DynamicType: Default,
     S: Serialize,
 {
@@ -52,19 +51,23 @@ where
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube_genops::scope::{Cluster, Namespaced};
+/// use kube_genops::scope::Namespaced;
 /// use kube_genops::status::patch_status;
+/// use kube_genops::traits::NamespacedResource;
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
-/// // Cluster-scoped
-/// // patch_status::<MyCR, _, _>(client.clone(), Cluster, "my-cr", MyStatus { ready: true }, "my-op").await?;
-///
-/// // Namespace-scoped
-/// // patch_status::<MyCR, _, _>(client, Namespaced("my-ns"), "my-cr", MyStatus { ready: true }, "my-op").await?;
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()>
+/// # where MyCR::DynamicType: Default {
+/// patch_status::<MyCR, _, _>(
+///     client,
+///     Namespaced("my-namespace"),
+///     "my-cr",
+///     MyStatus { ready: true },
+///     "my-operator",
+/// ).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -76,7 +79,7 @@ pub async fn patch_status<K, S, Scope>(
     field_manager: &str,
 ) -> Result<K>
 where
-    K: Resource + Clone + DeserializeOwned + Serialize + 'static,
+    K: KubeResource,
     K::DynamicType: Default,
     S: Serialize,
     Scope: ApiScope<K>,
@@ -112,20 +115,15 @@ where
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::NamespaceResourceScope;
 /// use kube_genops::status::patch_status_namespaced;
-/// use serde::{Deserialize, Serialize};
+/// use kube_genops::traits::NamespacedResource;
+/// use serde::Serialize;
 ///
-/// #[derive(Clone, Serialize, Deserialize)]
+/// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: Resource<Scope = NamespaceResourceScope> + Clone + Serialize
-/// #         + for<'de> Deserialize<'de> + 'static,
-/// #     MyCR::DynamicType: Default,
-/// # {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()>
+/// # where MyCR::DynamicType: Default {
 /// patch_status_namespaced::<MyCR, _>(
 ///     client,
 ///     "my-namespace",
@@ -144,7 +142,7 @@ pub async fn patch_status_namespaced<K, S>(
     field_manager: &str,
 ) -> Result<K>
 where
-    K: Resource<Scope = NamespaceResourceScope> + Clone + DeserializeOwned + Serialize + 'static,
+    K: NamespacedResource,
     K::DynamicType: Default,
     S: Serialize,
 {
@@ -171,20 +169,15 @@ where
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::ClusterResourceScope;
 /// use kube_genops::status::patch_status_cluster;
-/// use serde::{Deserialize, Serialize};
+/// use kube_genops::traits::ClusterResource;
+/// use serde::Serialize;
 ///
-/// #[derive(Clone, Serialize, Deserialize)]
+/// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: Resource<Scope = ClusterResourceScope> + Clone + Serialize
-/// #         + for<'de> Deserialize<'de> + 'static,
-/// #     MyCR::DynamicType: Default,
-/// # {
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()>
+/// # where MyCR::DynamicType: Default {
 /// patch_status_cluster::<MyCR, _>(
 ///     client,
 ///     "my-cr",
@@ -201,7 +194,7 @@ pub async fn patch_status_cluster<K, S>(
     field_manager: &str,
 ) -> Result<K>
 where
-    K: Resource<Scope = ClusterResourceScope> + Clone + DeserializeOwned + Serialize + 'static,
+    K: ClusterResource,
     K::DynamicType: Default,
     S: Serialize,
 {
