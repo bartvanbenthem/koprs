@@ -255,23 +255,73 @@ gc_resources::<MyNamespacedCR, _>(
 ).await?;
 ```
 
-### Watch for changes
+### Watcher
+
+The library exposes three layers of functions for watching resources:
+
+| Function | Use when |
+|---|---|
+| `watch_namespaced` / `watch_namespaced_by_label` | Your CRD is namespace-scoped (most common) |
+| `watch_cluster` / `watch_cluster_by_label` | Your CRD is cluster-scoped |
+| `watch` | Scope is generic or passed through from a caller |
 
 ```rust
-use kube_genops::watcher::{watch_resources, watch_resources_by_label};
-use k8s_openapi::api::core::v1::ConfigMap;
+use kube_genops::watcher::{
+    watch, watch_cluster, watch_cluster_by_label,
+    watch_namespaced, watch_namespaced_by_label,
+};
 use tokio::sync::mpsc;
 
 let (tx, mut rx) = mpsc::channel(16);
 
-// All ConfigMaps
-let _handle = watch_resources::<ConfigMap>(client.clone(), tx.clone()).await?;
+// Namespace-scoped CRD (convenience wrapper)
+let _handle = watch_namespaced::<Deployment>(
+    client.clone(),
+    "my-namespace",
+    tx.clone(),
+).await?;
 
-// Only those matching a label selector
-let _handle = watch_resources_by_label::<ConfigMap>(client.clone(), tx, "app=my-operator").await?;
+// Namespace-scoped CRD with label filter
+let _handle = watch_namespaced_by_label::<Deployment>(
+    client.clone(),
+    "my-namespace",
+    "app=my-operator",
+    tx.clone(),
+).await?;
 
+// Cluster-scoped CRD (convenience wrapper)
+let _handle = watch_cluster::<Namespace>(
+    client.clone(),
+    tx.clone(),
+).await?;
+
+// Cluster-scoped CRD with label filter
+let _handle = watch_cluster_by_label::<Namespace>(
+    client.clone(),
+    "app=my-operator",
+    tx.clone(),
+).await?;
+
+// Generic form — when scope is determined at runtime or passed through
+use kube_genops::scope::{Cluster, Namespaced};
+
+let _handle = watch::<Deployment, _>(
+    client.clone(),
+    Namespaced("my-namespace"),
+    None,
+    tx.clone(),
+).await?;
+
+let _handle = watch::<Namespace, _>(
+    client.clone(),
+    Cluster,
+    Some("app=my-operator"),
+    tx.clone(),
+).await?;
+
+// Consume signals from any of the above
 while let Some(()) = rx.recv().await {
-    println!("ConfigMap changed — trigger reconcile");
+    println!("Resource changed!");
 }
 ```
 
