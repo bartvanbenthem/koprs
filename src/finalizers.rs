@@ -39,12 +39,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::finalizers::add_finalizer;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// add_finalizer::<MyCR, _>(
 ///     client,
 ///     Namespaced("my-namespace"),
@@ -87,12 +88,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::finalizers::remove_finalizers;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// remove_finalizers::<MyCR, _>(
 ///     client,
 ///     Namespaced("my-namespace"),
@@ -129,11 +131,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::finalizers::add_finalizer_namespaced;
 /// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// add_finalizer_namespaced::<MyCR>(
 ///     client,
 ///     "my-namespace",
@@ -164,11 +167,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::finalizers::remove_finalizers_namespaced;
 /// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// remove_finalizers_namespaced::<MyCR>(
 ///     client,
 ///     "my-namespace",
@@ -201,11 +205,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::finalizers::add_finalizer_cluster;
 /// use kube_genops::traits::ClusterResource;
 ///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
 /// add_finalizer_cluster::<MyCR>(
 ///     client,
 ///     "my-resource",
@@ -230,11 +235,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::finalizers::remove_finalizers_cluster;
 /// use kube_genops::traits::ClusterResource;
 ///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
 /// remove_finalizers_cluster::<MyCR>(
 ///     client,
 ///     "my-resource",

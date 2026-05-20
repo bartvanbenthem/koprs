@@ -64,13 +64,14 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::watcher::watch;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::traits::NamespacedResource;
 /// use tokio::sync::mpsc;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// let (tx, mut rx) = mpsc::channel(16);
 /// let _handle = watch::<MyCR, _>(
 ///     client,
@@ -129,12 +130,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::watcher::watch_namespaced;
 /// use kube_genops::traits::NamespacedResource;
 /// use tokio::sync::mpsc;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// let (tx, mut rx) = mpsc::channel(16);
 /// let _handle = watch_namespaced::<MyCR>(client, "my-namespace", tx).await?;
 ///
@@ -168,12 +170,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::watcher::watch_namespaced_by_label;
 /// use kube_genops::traits::NamespacedResource;
 /// use tokio::sync::mpsc;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// let (tx, mut rx) = mpsc::channel(16);
 /// let _handle = watch_namespaced_by_label::<MyCR>(
 ///     client,
@@ -213,12 +216,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::watcher::watch_cluster;
 /// use kube_genops::traits::ClusterResource;
 /// use tokio::sync::mpsc;
 ///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
 /// let (tx, mut rx) = mpsc::channel(16);
 /// let _handle = watch_cluster::<MyCR>(client, tx).await?;
 ///
@@ -248,12 +252,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::watcher::watch_cluster_by_label;
 /// use kube_genops::traits::ClusterResource;
 /// use tokio::sync::mpsc;
 ///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
 /// let (tx, mut rx) = mpsc::channel(16);
 /// let _handle = watch_cluster_by_label::<MyCR>(
 ///     client,

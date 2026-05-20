@@ -10,7 +10,6 @@ name = "kube_genops"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1.0"
 thiserror = "1"
 futures = "0.3"
 k8s-openapi = { version = "0.25.0", default-features = false, features = ["v1_33"] }

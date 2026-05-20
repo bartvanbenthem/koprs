@@ -22,10 +22,11 @@ use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::ensure_namespace;
 ///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// ensure_namespace(client, "my-namespace", "my-operator").await?;
 /// # Ok(())
 /// # }
@@ -83,12 +84,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::apply_resource;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR>(client: Client, resource: MyCR) -> anyhow::Result<()>
+/// # async fn example<MyCR>(client: Client, resource: MyCR) -> Result<(), KubeGenericError>
 /// # where
 /// #     MyCR: NamespacedResource,
 /// # {
@@ -131,12 +133,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::delete_resource;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
 /// #     MyCR: NamespacedResource,
 /// # {
@@ -172,11 +175,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::apply_cluster_resource;
 /// use kube_genops::traits::ClusterResource;
 ///
-/// # async fn example<MyCR>(client: Client, resource: MyCR) -> anyhow::Result<()>
+/// # async fn example<MyCR>(client: Client, resource: MyCR) -> Result<(), KubeGenericError>
 /// # where
 /// #     MyCR: ClusterResource,
 /// # {
@@ -200,11 +204,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::delete_cluster_resource;
 /// use kube_genops::traits::ClusterResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
 /// #     MyCR: ClusterResource,
 /// # {
@@ -228,11 +233,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::apply_namespaced_resource;
 /// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR>(client: Client, resource: MyCR) -> anyhow::Result<()>
+/// # async fn example<MyCR>(client: Client, resource: MyCR) -> Result<(), KubeGenericError>
 /// # where
 /// #     MyCR: NamespacedResource,
 /// # {
@@ -257,11 +263,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::delete_namespaced_resource;
 /// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
 /// #     MyCR: NamespacedResource,
 /// # {
@@ -289,11 +296,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
 /// use kube_genops::resources::list_resources;
 ///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let pods = list_resources::<Pod>(client).await?;
 /// # Ok(())
 /// # }
@@ -311,11 +319,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
 /// use kube_genops::resources::list_resources_by_label;
 ///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let pods = list_resources_by_label::<Pod>(client, "app=my-operator").await?;
 /// # Ok(())
 /// # }
@@ -337,11 +346,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
 /// use kube_genops::resources::list_namespaced_resources;
 ///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let pods = list_namespaced_resources::<Pod>(client, "my-namespace").await?;
 /// # Ok(())
 /// # }
@@ -360,11 +370,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
 /// use kube_genops::resources::list_resource_names;
 ///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let names = list_resource_names::<Pod>(client, "app=my-operator").await?;
 /// # Ok(())
 /// # }
@@ -395,13 +406,14 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::wait_for_resources;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::traits::NamespacedResource;
 /// use std::time::Duration;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// let resources = wait_for_resources::<MyCR, _>(
 ///     client,
 ///     Namespaced("my-namespace"),
@@ -461,12 +473,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::wait_for_resources_namespaced;
 /// use kube_genops::traits::NamespacedResource;
 /// use std::time::Duration;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// let resources = wait_for_resources_namespaced::<MyCR>(
 ///     client,
 ///     "my-namespace",
@@ -495,12 +508,13 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::wait_for_resources_cluster;
 /// use kube_genops::traits::ClusterResource;
 /// use std::time::Duration;
 ///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
 /// let resources = wait_for_resources_cluster::<MyCR>(
 ///     client,
 ///     Duration::from_secs(10),
@@ -560,11 +574,12 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::make_object_refs;
 /// use kube_genops::scope::Namespaced;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
 /// #     MyCR: kube::Resource<DynamicType = (), Scope = k8s_openapi::NamespaceResourceScope>
 /// #         + Clone
@@ -608,10 +623,11 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::make_object_refs_namespaced;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
 /// #     MyCR: kube_genops::traits::NamespacedResource,
 /// # {
@@ -646,10 +662,11 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::resources::make_object_refs_cluster;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
 /// #     MyCR: kube_genops::traits::ClusterResource,
 /// # {
@@ -689,31 +706,34 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
 /// use kube_genops::resources::fetch_and_write_to_file;
 ///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
-/// fetch_and_write_to_file::<Pod>(client, "/tmp", "pods.json").await?;
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
+/// // Use _ to let the compiler infer the path type automatically
+/// fetch_and_write_to_file::<Pod, _>(client, "/tmp", "pods.json").await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn fetch_and_write_to_file<T>(client: Client, path: &str, file_name: &str) -> Result<()>
+pub async fn fetch_and_write_to_file<T, P>(client: Client, path: P, file_name: &str) -> Result<()>
 where
     T: KubeResource,
+    P: AsRef<Path>,
 {
-    let file_path = Path::new(path).join(file_name);
-    let file_str = file_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in file path"))?;
+    let file_path = path.as_ref().join(file_name);
     let list = list_resources::<T>(client).await?;
-    write_json_to_file(&list.items, file_str).await
+    write_json_to_file(&list.items, &file_path).await
 }
 
-async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()> {
+async fn write_json_to_file<T, P>(items: &[T], path: P) -> Result<()>
+where
+    T: Serialize,
+    P: AsRef<Path>,
+{
     let json = serde_json::to_string_pretty(items)?;
-    tokio::fs::write(path, json)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to write file: {}", e))?;
+    tokio::fs::write(path.as_ref(), json).await?;
+
     Ok(())
 }

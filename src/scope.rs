@@ -11,6 +11,7 @@
 //! # Example
 //!
 //! ```no_run
+//! use kube_genops::error::KubeGenericError;
 //! use kube::Client;
 //! use kube_genops::scope::{Cluster, Namespaced};
 //! use kube_genops::status::patch_status;
@@ -19,7 +20,7 @@
 //! #[derive(Serialize)]
 //! struct MyStatus { ready: bool }
 //!
-//! # async fn example(client: Client) -> anyhow::Result<()> {
+//! # async fn example(client: Client) -> Result<(), KubeGenericError> {
 //! // patch_status::<MyCR, _, _>(client.clone(), Cluster, "my-cr", MyStatus { ready: true }, "my-op").await?;
 //! // patch_status::<MyCR, _, _>(client, Namespaced("my-ns"), "my-cr", MyStatus { ready: true }, "my-op").await?;
 //! # Ok(())
@@ -40,6 +41,7 @@ use serde::de::DeserializeOwned;
 /// # Example
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube_genops::scope::Cluster;
 /// use kube_genops::status::patch_status;
 /// use serde::Serialize;
@@ -47,7 +49,7 @@ use serde::de::DeserializeOwned;
 /// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example(client: kube::Client) -> anyhow::Result<()> {
+/// # async fn example(client: kube::Client) -> Result<(), KubeGenericError> {
 /// // patch_status::<MyCR, _, _>(client, Cluster, "my-cr", MyStatus { ready: true }, "my-op").await?;
 /// # Ok(())
 /// # }
@@ -66,6 +68,7 @@ pub struct Cluster;
 /// # Example
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::status::patch_status;
 /// use serde::Serialize;
@@ -73,7 +76,7 @@ pub struct Cluster;
 /// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example(client: kube::Client) -> anyhow::Result<()> {
+/// # async fn example(client: kube::Client) -> Result<(), KubeGenericError> {
 /// // patch_status::<MyCR, _, _>(client, Namespaced("my-ns"), "my-cr", MyStatus { ready: true }, "my-op").await?;
 /// # Ok(())
 /// # }

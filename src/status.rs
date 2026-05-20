@@ -50,6 +50,7 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::status::patch_status;
@@ -59,7 +60,7 @@ where
 /// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError>
 /// # where MyCR::DynamicType: Default {
 /// patch_status::<MyCR, _, _>(
 ///     client,
@@ -120,6 +121,7 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::status::patch_status_namespaced;
 /// use kube_genops::traits::NamespacedResource;
@@ -128,7 +130,7 @@ where
 /// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError>
 /// # where MyCR::DynamicType: Default {
 /// patch_status_namespaced::<MyCR, _>(
 ///     client,
@@ -174,6 +176,7 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::status::patch_status_cluster;
 /// use kube_genops::traits::ClusterResource;
@@ -182,7 +185,7 @@ where
 /// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError>
 /// # where MyCR::DynamicType: Default {
 /// patch_status_cluster::<MyCR, _>(
 ///     client,
