@@ -1,21 +1,35 @@
 use std::collections::HashSet;
-use std::fmt::Debug;
 use std::path::Path;
+use std::time::Duration;
 
-use k8s_openapi::{ClusterResourceScope, Metadata, NamespaceResourceScope};
 use k8s_openapi::api::core::v1::Namespace;
-use kube::api::{DeleteParams, ObjectList, Patch, PatchParams};
-use kube::{Api, Client, Resource, ResourceExt};
+use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams};
 use kube::core::ObjectMeta;
-use serde::de::DeserializeOwned;
+use kube::{Api, Client, Resource, ResourceExt};
 use serde::Serialize;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::error::{KubeGenericError, Result};
+use crate::scope::{ApiScope, Cluster, Namespaced};
+use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
-// --- Namespace ---
+// ---------------------------------------------------------------------------
+// Namespace
+// ---------------------------------------------------------------------------
 
 /// Ensure a namespace exists, creating or updating it via Server-Side Apply.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::ensure_namespace;
+///
+/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// ensure_namespace(client, "my-namespace", "my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
 pub async fn ensure_namespace(
     client: Client,
     name: &str,
@@ -29,59 +43,32 @@ pub async fn ensure_namespace(
         },
         ..Default::default()
     };
-
     info!(%name, "Ensuring namespace exists");
     let params = PatchParams::apply(field_manager).force();
     Ok(api.patch(name, &params, &Patch::Apply(&ns)).await?)
 }
 
-// --- Cluster-scoped ---
+// ---------------------------------------------------------------------------
+// Private core helpers
+// ---------------------------------------------------------------------------
 
-/// Apply (create or update) a cluster-scoped resource using Server-Side Apply.
-pub async fn apply_cluster_resource<T>(
-    client: Client,
-    resource: &T,
-    field_manager: &str,
-) -> Result<T>
+async fn apply_resource_inner<T>(api: Api<T>, resource: &T, field_manager: &str) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = ClusterResourceScope>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
-    let api: Api<T> = Api::all(client);
     let name = resource.metadata().name.as_deref().unwrap_or("[unnamed]");
     let kind = T::kind(&());
-
-    info!(%kind, %name, "Applying cluster-scoped resource");
-
+    info!(%kind, %name, "Applying resource");
     let params = PatchParams::apply(field_manager).force();
     Ok(api.patch(name, &params, &Patch::Apply(resource)).await?)
 }
 
-/// Delete a cluster-scoped resource by name.
-/// Returns `Ok(false)` if the resource did not exist.
-pub async fn delete_cluster_resource<T>(client: Client, name: &str) -> Result<bool>
+async fn delete_resource_inner<T>(api: Api<T>, name: &str) -> Result<bool>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = ClusterResourceScope>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
-    let api: Api<T> = Api::all(client);
     let kind = T::kind(&());
-
-    info!(%kind, %name, "Deleting cluster-scoped resource");
-
+    info!(%kind, %name, "Deleting resource");
     match api.delete(name, &DeleteParams::default()).await {
         Ok(_) => Ok(true),
         Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
@@ -89,9 +76,159 @@ where
     }
 }
 
-// --- Namespaced ---
+// ---------------------------------------------------------------------------
+// Generic public API — apply
+// ---------------------------------------------------------------------------
 
-/// Apply (create or update) a namespaced resource using Server-Side Apply.
+/// Apply (create or update) a Kubernetes resource using Server-Side Apply.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::apply_resource;
+/// use kube_genops::scope::Namespaced;
+/// use kube_genops::traits::NamespacedResource;
+///
+/// # async fn example<MyCR>(client: Client, resource: MyCR) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: NamespacedResource,
+/// # {
+/// apply_resource::<MyCR, _>(
+///     client,
+///     Namespaced("my-namespace"),
+///     &resource,
+///     "my-operator",
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn apply_resource<T, Scope>(
+    client: Client,
+    scope: Scope,
+    resource: &T,
+    field_manager: &str,
+) -> Result<T>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    apply_resource_inner(scope.into_api(client), resource, field_manager).await
+}
+
+// ---------------------------------------------------------------------------
+// Generic public API — delete
+// ---------------------------------------------------------------------------
+
+/// Delete a Kubernetes resource by name.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::delete_resource;
+/// use kube_genops::scope::Namespaced;
+/// use kube_genops::traits::NamespacedResource;
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: NamespacedResource,
+/// # {
+/// delete_resource::<MyCR, _>(
+///     client,
+///     Namespaced("my-namespace"),
+///     "my-resource",
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn delete_resource<T, Scope>(client: Client, scope: Scope, name: &str) -> Result<bool>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    delete_resource_inner(scope.into_api(client), name).await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — cluster-scoped
+// ---------------------------------------------------------------------------
+
+/// Apply a cluster-scoped resource.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::apply_cluster_resource;
+/// use kube_genops::traits::ClusterResource;
+///
+/// # async fn example<MyCR>(client: Client, resource: MyCR) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: ClusterResource,
+/// # {
+/// apply_cluster_resource::<MyCR>(client, &resource, "my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn apply_cluster_resource<T>(
+    client: Client,
+    resource: &T,
+    field_manager: &str,
+) -> Result<T>
+where
+    T: ClusterResource,
+{
+    apply_resource::<T, _>(client, Cluster, resource, field_manager).await
+}
+
+/// Delete a cluster-scoped resource.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::delete_cluster_resource;
+/// use kube_genops::traits::ClusterResource;
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: ClusterResource,
+/// # {
+/// delete_cluster_resource::<MyCR>(client, "my-resource").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn delete_cluster_resource<T>(client: Client, name: &str) -> Result<bool>
+where
+    T: ClusterResource,
+{
+    delete_resource_inner(Api::<T>::all(client), name).await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — namespaced
+// ---------------------------------------------------------------------------
+
+/// Apply a namespaced resource.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::apply_namespaced_resource;
+/// use kube_genops::traits::NamespacedResource;
+///
+/// # async fn example<MyCR>(client: Client, resource: MyCR) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: NamespacedResource,
+/// # {
+/// apply_namespaced_resource::<MyCR>(client, "my-namespace", &resource, "my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
 pub async fn apply_namespaced_resource<T>(
     client: Client,
     namespace: &str,
@@ -99,192 +236,417 @@ pub async fn apply_namespaced_resource<T>(
     field_manager: &str,
 ) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Default
-        + Send
-        + Sync
-        + 'static,
+    T: NamespacedResource,
 {
-    let api: Api<T> = Api::namespaced(client, namespace);
-    let name = resource.metadata().name.as_deref().unwrap_or("[unnamed]");
-    let kind = T::kind(&());
-
-    info!(%kind, %name, %namespace, "Applying namespaced resource");
-
-    let params = PatchParams::apply(field_manager).force();
-    Ok(api.patch(name, &params, &Patch::Apply(resource)).await?)
+    apply_resource::<T, _>(client, Namespaced(namespace), resource, field_manager).await
 }
 
-/// Delete a namespaced resource by name.
-/// Returns `Ok(false)` if the resource did not exist.
+/// Delete a namespaced resource.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::delete_namespaced_resource;
+/// use kube_genops::traits::NamespacedResource;
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: NamespacedResource,
+/// # {
+/// delete_namespaced_resource::<MyCR>(client, "my-namespace", "my-resource").await?;
+/// # Ok(())
+/// # }
+/// ```
 pub async fn delete_namespaced_resource<T>(
     client: Client,
     namespace: &str,
     name: &str,
 ) -> Result<bool>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: NamespacedResource,
 {
-    let api: Api<T> = Api::namespaced(client, namespace);
-    let kind = T::kind(&());
-
-    info!(%kind, %name, %namespace, "Deleting namespaced resource");
-
-    match api.delete(name, &DeleteParams::default()).await {
-        Ok(_) => Ok(true),
-        Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
-        Err(e) => Err(e.into()),
-    }
+    delete_resource_inner(Api::<T>::namespaced(client, namespace), name).await
 }
 
-// --- Listing ---
+// ---------------------------------------------------------------------------
+// Listing
+// ---------------------------------------------------------------------------
 
 /// List all resources of type `T` across all namespaces.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use kube_genops::resources::list_resources;
+///
+/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// let pods = list_resources::<Pod>(client).await?;
+/// # Ok(())
+/// # }
+/// ```
 pub async fn list_resources<T>(client: Client) -> Result<ObjectList<T>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
     let api: Api<T> = Api::all(client);
     Ok(api.list(&Default::default()).await?)
 }
 
 /// List all resources of type `T` matching a label selector.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use kube_genops::resources::list_resources_by_label;
+///
+/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// let pods = list_resources_by_label::<Pod>(client, "app=my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
 pub async fn list_resources_by_label<T>(
     client: Client,
     label_selector: &str,
 ) -> Result<ObjectList<T>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
     let api: Api<T> = Api::all(client);
-    let lp = kube::api::ListParams::default().labels(label_selector);
+    let lp = ListParams::default().labels(label_selector);
     Ok(api.list(&lp).await?)
 }
 
 /// List all resources of type `T` in a specific namespace.
-pub async fn list_namespaced_resources<T>(
-    client: Client,
-    namespace: &str,
-) -> Result<ObjectList<T>>
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use kube_genops::resources::list_namespaced_resources;
+///
+/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// let pods = list_namespaced_resources::<Pod>(client, "my-namespace").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn list_namespaced_resources<T>(client: Client, namespace: &str) -> Result<ObjectList<T>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: NamespacedResource,
 {
     let api: Api<T> = Api::namespaced(client, namespace);
     Ok(api.list(&Default::default()).await?)
 }
 
-// --- Fetch and persist ---
-
-/// Fetch all resources of type `T` and write them as JSON to a file on disk.
-pub async fn fetch_and_write_to_file<T>(
-    client: Client,
-    path: &str,
-    file_name: &str,
-) -> Result<()>
+/// List the names of all resources of type `T` matching a label selector,
+/// returned as a `HashSet<String>`. Useful for garbage collection diffing.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use kube_genops::resources::list_resource_names;
+///
+/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// let names = list_resource_names::<Pod>(client, "app=my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn list_resource_names<T>(client: Client, label_selector: &str) -> Result<HashSet<String>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Serialize
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
-    let file_path = Path::new(path).join(file_name);
-    let file_str = file_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in file path"))?;
-
-    let list = list_resources::<T>(client).await?;
-    write_json_to_file(&list.items, file_str).await?;
-    Ok(())
+    let list = list_resources_by_label::<T>(client, label_selector).await?;
+    Ok(list.items.iter().map(|r| r.name_any()).collect())
 }
 
-async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()> {
-    let json = serde_json::to_string_pretty(items)?;
-    tokio::fs::write(path, json)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to write file: {}", e))?;
-    Ok(())
+// ---------------------------------------------------------------------------
+// Polling
+// ---------------------------------------------------------------------------
+
+/// Poll until at least one resource of type `T` exists, returning the full list.
+///
+/// Retries every `interval` on a healthy API returning zero results. On API
+/// errors the interval is doubled (capped at 60 s) before retrying. Returns
+/// as soon as one or more resources are found.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
+/// correct API surface at compile time. Prefer [`wait_for_resources_namespaced`]
+/// or [`wait_for_resources_cluster`] for the common cases — they are thin
+/// wrappers around this function.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::wait_for_resources;
+/// use kube_genops::scope::Namespaced;
+/// use kube_genops::traits::NamespacedResource;
+/// use std::time::Duration;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// let resources = wait_for_resources::<MyCR, _>(
+///     client,
+///     Namespaced("my-namespace"),
+///     Duration::from_secs(10),
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn wait_for_resources<T, Scope>(
+    client: Client,
+    scope: Scope,
+    interval: Duration,
+) -> Result<Vec<T>>
+where
+    T: KubeResource,
+    Scope: ApiScope<T> + Clone,
+{
+    let kind = T::kind(&());
+    info!(%kind, "Waiting for at least one resource");
+    loop {
+        let api: Api<T> = scope.clone().into_api(client.clone());
+        match api.list(&Default::default()).await {
+            Ok(list) if !list.items.is_empty() => {
+                info!(%kind, count = list.items.len(), "Resources found");
+                return Ok(list.items);
+            }
+            Ok(_) => {
+                info!(%kind, ?interval, "No resources found, retrying");
+                tokio::time::sleep(interval).await;
+            }
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                let backoff = interval.min(Duration::from_secs(60));
+                error!(%kind, code = 404, ?backoff, "CRD not found, retrying");
+                tokio::time::sleep(backoff).await;
+            }
+            Err(e) => {
+                let backoff = (interval * 2).min(Duration::from_secs(60));
+                error!(%kind, error = %e, ?backoff, "API error, retrying");
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
 }
 
-// --- ObjectRef helpers ---
-
-/// Generate `ObjectRef`s for all instances of a namespaced resource type.
-/// Useful for setting up watched relations in `kube-runtime` controllers.
-/// See: <https://kube.rs/controllers/relations/#watched-relations>
-pub async fn make_object_refs<T>(
+/// Poll until at least one **namespace-scoped** resource of type `T` exists,
+/// returning the full list.
+///
+/// Delegates to [`wait_for_resources`] with [`Namespaced`] as the scope. The
+/// resource type `T` must implement [`NamespacedResource`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::wait_for_resources_namespaced;
+/// use kube_genops::traits::NamespacedResource;
+/// use std::time::Duration;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// let resources = wait_for_resources_namespaced::<MyCR>(
+///     client,
+///     "my-namespace",
+///     Duration::from_secs(10),
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn wait_for_resources_namespaced<T>(
     client: Client,
-    namespace: Option<&str>,
-) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+    namespace: &str,
+    interval: Duration,
+) -> Result<Vec<T>>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + DeserializeOwned
-        + Serialize
-        + Send
-        + Sync
-        + 'static,
+    T: NamespacedResource,
 {
-    let api: Api<T> = match namespace {
-        Some(ns) => Api::namespaced(client, ns),
-        None => Api::all(client),
-    };
+    wait_for_resources::<T, _>(client, Namespaced(namespace), interval).await
+}
 
+/// Poll until at least one **cluster-scoped** resource of type `T` exists,
+/// returning the full list.
+///
+/// Delegates to [`wait_for_resources`] with [`Cluster`] as the scope. The
+/// resource type `T` must implement [`ClusterResource`].
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::wait_for_resources_cluster;
+/// use kube_genops::traits::ClusterResource;
+/// use std::time::Duration;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()> {
+/// let resources = wait_for_resources_cluster::<MyCR>(
+///     client,
+///     Duration::from_secs(10),
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn wait_for_resources_cluster<T>(client: Client, interval: Duration) -> Result<Vec<T>>
+where
+    T: ClusterResource,
+{
+    wait_for_resources::<T, _>(client, Cluster, interval).await
+}
+
+// ---------------------------------------------------------------------------
+// ObjectRef helpers
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Private core helpers
+// ---------------------------------------------------------------------------
+
+async fn build_object_refs<T>(api: Api<T>) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+where
+    T: Resource<DynamicType = ()> + Clone + std::fmt::Debug + serde::de::DeserializeOwned,
+{
     let resources = api.list(&Default::default()).await?;
     let mut refs = Vec::new();
-
     for resource in resources.items {
         let meta = resource.meta();
         let name = meta
             .name
             .clone()
             .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))?;
-        let ns = meta
-            .namespace
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-
-        info!(%name, %ns, "Building ObjectRef");
-        refs.push(kube_runtime::reflector::ObjectRef::new(&name).within(&ns));
+        info!(%name, "Building ObjectRef");
+        refs.push(kube_runtime::reflector::ObjectRef::new(&name));
     }
-
     Ok(refs)
+}
+
+// ---------------------------------------------------------------------------
+// Generic public API
+// ---------------------------------------------------------------------------
+
+/// Generate `ObjectRef`s for all instances of a resource type.
+///
+/// Works for both namespaced and cluster-scoped resources — pass [`Namespaced`]
+/// or [`Cluster`] as the `scope` argument to select the correct API surface at
+/// compile time.
+///
+/// Prefer [`make_object_refs_namespaced`] or [`make_object_refs_cluster`] for
+/// the common cases — they are thin wrappers around this function.
+///
+/// Useful for setting up watched relations in `kube-runtime` controllers.
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::make_object_refs;
+/// use kube_genops::scope::Namespaced;
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: kube::Resource<DynamicType = (), Scope = k8s_openapi::NamespaceResourceScope>
+/// #         + Clone
+/// #         + std::fmt::Debug
+/// #         + serde::Serialize
+/// #         + for<'de> serde::Deserialize<'de>
+/// #         + k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>
+/// #         + Send
+/// #         + Sync
+/// #         + 'static,
+/// # {
+/// let refs = make_object_refs::<MyCR, _>(client, Namespaced("my-namespace")).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn make_object_refs<T, Scope>(
+    client: Client,
+    scope: Scope,
+) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    build_object_refs(scope.into_api(client)).await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — namespaced
+// ---------------------------------------------------------------------------
+
+/// Generate `ObjectRef`s for all instances of a **namespace-scoped** resource type.
+///
+/// Delegates to [`make_object_refs`] with [`Namespaced`] as the scope. The
+/// resource type `T` must implement `Resource<Scope = NamespaceResourceScope>`,
+/// which the compiler enforces — passing a cluster-scoped type is a compile
+/// error.
+///
+/// Useful for setting up watched relations in `kube-runtime` controllers.
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::make_object_refs_namespaced;
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: kube_genops::traits::NamespacedResource,
+/// # {
+/// let refs = make_object_refs_namespaced::<MyCR>(client, "my-namespace").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn make_object_refs_namespaced<T>(
+    client: Client,
+    namespace: &str,
+) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+where
+    T: NamespacedResource,
+{
+    make_object_refs::<T, _>(client, Namespaced(namespace)).await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — cluster-scoped
+// ---------------------------------------------------------------------------
+
+/// Generate `ObjectRef`s for all instances of a **cluster-scoped** resource type.
+///
+/// Delegates to [`make_object_refs`] with [`Cluster`] as the scope. The
+/// resource type `T` must implement `Resource<Scope = ClusterResourceScope>`,
+/// which the compiler enforces — passing a namespace-scoped type is a compile
+/// error.
+///
+/// Useful for setting up watched relations in `kube-runtime` controllers.
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::make_object_refs_cluster;
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: kube_genops::traits::ClusterResource,
+/// # {
+/// let refs = make_object_refs_cluster::<MyCR>(client).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn make_object_refs_cluster<T>(
+    client: Client,
+) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+where
+    T: ClusterResource,
+{
+    make_object_refs::<T, _>(client, Cluster).await
 }
 
 /// Build a mapper function that returns a fixed set of `ObjectRef`s for any
@@ -301,22 +663,40 @@ where
     move |_: T| (*refs).clone()
 }
 
-/// List the names of all resources of type `T` matching a label selector,
-/// returned as a `HashSet<String>`. Useful for garbage collection diffing.
-pub async fn list_resource_names<T>(
-    client: Client,
-    label_selector: &str,
-) -> Result<HashSet<String>>
+// ---------------------------------------------------------------------------
+// Fetch and persist
+// ---------------------------------------------------------------------------
+
+/// Fetch all resources of type `T` and write them as JSON to a file on disk.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use kube_genops::resources::fetch_and_write_to_file;
+///
+/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// fetch_and_write_to_file::<Pod>(client, "/tmp", "pods.json").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn fetch_and_write_to_file<T>(client: Client, path: &str, file_name: &str) -> Result<()>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    T: KubeResource,
 {
-    let list = list_resources_by_label::<T>(client, label_selector).await?;
-    Ok(list.items.iter().map(|r| r.name_any()).collect())
+    let file_path = Path::new(path).join(file_name);
+    let file_str = file_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in file path"))?;
+    let list = list_resources::<T>(client).await?;
+    write_json_to_file(&list.items, file_str).await
+}
+
+async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()> {
+    let json = serde_json::to_string_pretty(items)?;
+    tokio::fs::write(path, json)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to write file: {}", e))?;
+    Ok(())
 }

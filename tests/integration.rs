@@ -39,8 +39,8 @@ use kube_genops::finalizers::{
 use kube_genops::gc::{gc_cluster_resources, gc_namespaced_resources};
 use kube_genops::resources::{
     apply_cluster_resource, apply_namespaced_resource, delete_cluster_resource,
-    delete_namespaced_resource, ensure_namespace, list_namespaced_resources,
-    list_resources, list_resources_by_label,
+    delete_namespaced_resource, ensure_namespace, list_namespaced_resources, list_resources,
+    list_resources_by_label,
 };
 use kube_genops::status::{patch_cluster_status, patch_namespaced_status};
 use serde::{Deserialize, Serialize};
@@ -74,7 +74,11 @@ fn configmap(name: &str, namespace: &str, label: Option<&str>) -> ConfigMap {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
             namespace: Some(namespace.to_string()),
-            labels: if labels.is_empty() { None } else { Some(labels) },
+            labels: if labels.is_empty() {
+                None
+            } else {
+                Some(labels)
+            },
             ..Default::default()
         },
         ..Default::default()
@@ -89,7 +93,11 @@ fn cluster_role(name: &str, label: Option<&str>) -> ClusterRole {
     ClusterRole {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
-            labels: if labels.is_empty() { None } else { Some(labels) },
+            labels: if labels.is_empty() {
+                None
+            } else {
+                Some(labels)
+            },
             ..Default::default()
         },
         ..Default::default()
@@ -117,7 +125,9 @@ async fn test_ensure_namespace_creates_and_is_idempotent() {
 
     // Verify it exists
     let api: Api<Namespace> = Api::all(client.clone());
-    api.get(&name).await.expect("Namespace not found after ensure");
+    api.get(&name)
+        .await
+        .expect("Namespace not found after ensure");
 
     // Cleanup
     api.delete(&name, &Default::default()).await.ok();
@@ -141,7 +151,9 @@ async fn test_apply_and_delete_namespaced_configmap() {
 
     // Verify exists
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
-    api.get(&name).await.expect("ConfigMap not found after apply");
+    api.get(&name)
+        .await
+        .expect("ConfigMap not found after apply");
 
     // Delete
     let deleted = delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &name)
@@ -194,7 +206,9 @@ async fn test_apply_and_delete_cluster_role() {
 
     // Verify
     let api: Api<ClusterRole> = Api::all(client.clone());
-    api.get(&name).await.expect("ClusterRole not found after apply");
+    api.get(&name)
+        .await
+        .expect("ClusterRole not found after apply");
 
     // Delete
     let deleted = delete_cluster_resource::<ClusterRole>(client.clone(), &name)
@@ -366,12 +380,20 @@ async fn test_gc_cluster_resources_deletes_orphans() {
     let orphan = uid("genops-gc-orphan");
 
     // Create both
-    apply_cluster_resource(client.clone(), &cluster_role(&keep, Some(&label)), "kube-genops-test")
-        .await
-        .unwrap();
-    apply_cluster_resource(client.clone(), &cluster_role(&orphan, Some(&label)), "kube-genops-test")
-        .await
-        .unwrap();
+    apply_cluster_resource(
+        client.clone(),
+        &cluster_role(&keep, Some(&label)),
+        "kube-genops-test",
+    )
+    .await
+    .unwrap();
+    apply_cluster_resource(
+        client.clone(),
+        &cluster_role(&orphan, Some(&label)),
+        "kube-genops-test",
+    )
+    .await
+    .unwrap();
 
     // GC — only keep in desired set
     let desired: HashSet<String> = [keep.clone()].into();
@@ -381,14 +403,22 @@ async fn test_gc_cluster_resources_deletes_orphans() {
 
     // Verify orphan is gone, keeper remains
     let api: Api<ClusterRole> = Api::all(client.clone());
-    let remaining = api.list(&ListParams::default().labels(&selector)).await.unwrap();
+    let remaining = api
+        .list(&ListParams::default().labels(&selector))
+        .await
+        .unwrap();
     let names: Vec<_> = remaining.items.iter().map(|r| r.name_any()).collect();
 
     assert!(names.contains(&keep), "Kept resource was deleted");
-    assert!(!names.contains(&orphan), "Orphaned resource was not deleted");
+    assert!(
+        !names.contains(&orphan),
+        "Orphaned resource was not deleted"
+    );
 
     // Cleanup
-    delete_cluster_resource::<ClusterRole>(client.clone(), &keep).await.ok();
+    delete_cluster_resource::<ClusterRole>(client.clone(), &keep)
+        .await
+        .ok();
 }
 
 // =========================================================================
@@ -406,34 +436,43 @@ async fn test_gc_namespaced_resources_deletes_orphans() {
     let orphan = uid("genops-gc-ns-orphan");
 
     apply_namespaced_resource(
-        client.clone(), ns,
+        client.clone(),
+        ns,
         &configmap(&keep, ns, Some(&label)),
         "kube-genops-test",
     )
     .await
     .unwrap();
     apply_namespaced_resource(
-        client.clone(), ns,
+        client.clone(),
+        ns,
         &configmap(&orphan, ns, Some(&label)),
         "kube-genops-test",
     )
     .await
     .unwrap();
 
-    let desired: HashSet<(String, String)> =
-        [(ns.to_string(), keep.clone())].into();
+    let desired: HashSet<(String, String)> = [(ns.to_string(), keep.clone())].into();
 
     gc_namespaced_resources::<ConfigMap>(client.clone(), &selector, &desired)
         .await
         .expect("gc_namespaced_resources failed");
 
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
-    let remaining = api.list(&ListParams::default().labels(&selector)).await.unwrap();
+    let remaining = api
+        .list(&ListParams::default().labels(&selector))
+        .await
+        .unwrap();
     let names: Vec<_> = remaining.items.iter().map(|r| r.name_any()).collect();
 
     assert!(names.contains(&keep), "Kept ConfigMap was deleted");
-    assert!(!names.contains(&orphan), "Orphaned ConfigMap was not deleted");
+    assert!(
+        !names.contains(&orphan),
+        "Orphaned ConfigMap was not deleted"
+    );
 
     // Cleanup
-    delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &keep).await.ok();
+    delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &keep)
+        .await
+        .ok();
 }
