@@ -407,42 +407,19 @@ async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()>
 // ObjectRef helpers
 // ---------------------------------------------------------------------------
 
-/// Generate `ObjectRef`s for all instances of a cluster-scoped resource type.
-///
-/// Useful for setting up watched relations in `kube-runtime` controllers
-/// where the watched resource is cluster-scoped (e.g. `Node`,
-/// `PersistentVolume`, `ClusterRole`).
-///
-/// See: <https://kube.rs/controllers/relations/#watched-relations>
-///
-/// # Examples
-///
-/// ```no_run
-/// use kube::Client;
-/// use kube::ResourceExt;
-/// use kube_genops::resources::make_cluster_object_refs;
-/// use kube_genops::traits::ClusterResource;
-///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: ClusterResource,
-/// # {
-/// let refs = make_cluster_object_refs::<MyCR>(client).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn make_cluster_object_refs<T>(
-    client: Client,
-) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+// ---------------------------------------------------------------------------
+// Private core helpers
+// ---------------------------------------------------------------------------
+
+async fn build_object_refs<T>(api: Api<T>) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
 where
-    T: ClusterResource,
+    T: Resource<DynamicType = ()> + Clone + std::fmt::Debug + serde::de::DeserializeOwned,
 {
-    let api: Api<T> = Api::all(client);
     let resources = api.list(&Default::default()).await?;
     let mut refs = Vec::new();
     for resource in resources.items {
-        let name = resource
-            .meta()
+        let meta = resource.meta();
+        let name = meta
             .name
             .clone()
             .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))?;
@@ -452,7 +429,18 @@ where
     Ok(refs)
 }
 
-/// Generate `ObjectRef`s for all instances of a namespaced resource type.
+// ---------------------------------------------------------------------------
+// Generic public API
+// ---------------------------------------------------------------------------
+
+/// Generate `ObjectRef`s for all instances of a resource type.
+///
+/// Works for both namespaced and cluster-scoped resources — pass [`Namespaced`]
+/// or [`Cluster`] as the `scope` argument to select the correct API surface at
+/// compile time.
+///
+/// Prefer [`make_object_refs_namespaced`] or [`make_object_refs_cluster`] for
+/// the common cases — they are thin wrappers around this function.
 ///
 /// Useful for setting up watched relations in `kube-runtime` controllers.
 /// See: <https://kube.rs/controllers/relations/#watched-relations>
@@ -461,49 +449,109 @@ where
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::ResourceExt;
-/// use kube_genops::resources::make_namespaced_object_refs;
-/// use kube_genops::traits::NamespacedResource;
+/// use kube_genops::resources::make_object_refs;
+/// use kube_genops::scope::Namespaced;
 ///
 /// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
 /// # where
-/// #     MyCR: NamespacedResource,
+/// #     MyCR: kube::Resource<DynamicType = (), Scope = k8s_openapi::NamespaceResourceScope>
+/// #         + Clone
+/// #         + std::fmt::Debug
+/// #         + serde::Serialize
+/// #         + for<'de> serde::Deserialize<'de>
+/// #         + k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>
+/// #         + Send
+/// #         + Sync
+/// #         + 'static,
 /// # {
-/// let refs = make_namespaced_object_refs::<MyCR>(client, Some("my-namespace")).await?;
+/// let refs = make_object_refs::<MyCR, _>(client, Namespaced("my-namespace")).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn make_namespaced_object_refs<T>(
+pub async fn make_object_refs<T, Scope>(
     client: Client,
-    namespace: Option<&str>,
+    scope: Scope,
+) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    build_object_refs(scope.into_api(client)).await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — namespaced
+// ---------------------------------------------------------------------------
+
+/// Generate `ObjectRef`s for all instances of a **namespace-scoped** resource type.
+///
+/// Delegates to [`make_object_refs`] with [`Namespaced`] as the scope. The
+/// resource type `T` must implement `Resource<Scope = NamespaceResourceScope>`,
+/// which the compiler enforces — passing a cluster-scoped type is a compile
+/// error.
+///
+/// Useful for setting up watched relations in `kube-runtime` controllers.
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::make_object_refs_namespaced;
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: kube_genops::traits::NamespacedResource,
+/// # {
+/// let refs = make_object_refs_namespaced::<MyCR>(client, "my-namespace").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn make_object_refs_namespaced<T>(
+    client: Client,
+    namespace: &str,
 ) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
 where
     T: NamespacedResource,
 {
-    let api: Api<T> = match namespace {
-        Some(ns) => Api::namespaced(client, ns),
-        None => Api::all(client),
-    };
+    make_object_refs::<T, _>(client, Namespaced(namespace)).await
+}
 
-    let resources = api.list(&Default::default()).await?;
-    let mut refs = Vec::new();
+// ---------------------------------------------------------------------------
+// Convenience wrappers — cluster-scoped
+// ---------------------------------------------------------------------------
 
-    for resource in resources.items {
-        let meta = resource.meta();
-        let name = meta
-            .name
-            .clone()
-            .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))?;
-        let ns = meta
-            .namespace
-            .clone()
-            .unwrap_or_else(|| "default".to_string());
-
-        info!(%name, %ns, "Building ObjectRef");
-        refs.push(kube_runtime::reflector::ObjectRef::new(&name).within(&ns));
-    }
-
-    Ok(refs)
+/// Generate `ObjectRef`s for all instances of a **cluster-scoped** resource type.
+///
+/// Delegates to [`make_object_refs`] with [`Cluster`] as the scope. The
+/// resource type `T` must implement `Resource<Scope = ClusterResourceScope>`,
+/// which the compiler enforces — passing a namespace-scoped type is a compile
+/// error.
+///
+/// Useful for setting up watched relations in `kube-runtime` controllers.
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use kube_genops::resources::make_object_refs_cluster;
+///
+/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
+/// # where
+/// #     MyCR: kube_genops::traits::ClusterResource,
+/// # {
+/// let refs = make_object_refs_cluster::<MyCR>(client).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn make_object_refs_cluster<T>(
+    client: Client,
+) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+where
+    T: ClusterResource,
+{
+    make_object_refs::<T, _>(client, Cluster).await
 }
 
 /// Build a mapper function that returns a fixed set of `ObjectRef`s for any
