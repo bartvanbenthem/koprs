@@ -367,44 +367,6 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Fetch and persist
-// ---------------------------------------------------------------------------
-
-/// Fetch all resources of type `T` and write them as JSON to a file on disk.
-///
-/// # Examples
-///
-/// ```no_run
-/// use kube::Client;
-/// use k8s_openapi::api::core::v1::Pod;
-/// use kube_genops::resources::fetch_and_write_to_file;
-///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
-/// fetch_and_write_to_file::<Pod>(client, "/tmp", "pods.json").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn fetch_and_write_to_file<T>(client: Client, path: &str, file_name: &str) -> Result<()>
-where
-    T: KubeResource,
-{
-    let file_path = Path::new(path).join(file_name);
-    let file_str = file_path
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in file path"))?;
-    let list = list_resources::<T>(client).await?;
-    write_json_to_file(&list.items, file_str).await
-}
-
-async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()> {
-    let json = serde_json::to_string_pretty(items)?;
-    tokio::fs::write(path, json)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to write file: {}", e))?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Polling
 // ---------------------------------------------------------------------------
 
@@ -702,4 +664,42 @@ where
     T: kube::core::object::HasSpec + 'static,
 {
     move |_: T| (*refs).clone()
+}
+
+// ---------------------------------------------------------------------------
+// Fetch and persist
+// ---------------------------------------------------------------------------
+
+/// Fetch all resources of type `T` and write them as JSON to a file on disk.
+///
+/// # Examples
+///
+/// ```no_run
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use kube_genops::resources::fetch_and_write_to_file;
+///
+/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// fetch_and_write_to_file::<Pod>(client, "/tmp", "pods.json").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn fetch_and_write_to_file<T>(client: Client, path: &str, file_name: &str) -> Result<()>
+where
+    T: KubeResource,
+{
+    let file_path = Path::new(path).join(file_name);
+    let file_str = file_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in file path"))?;
+    let list = list_resources::<T>(client).await?;
+    write_json_to_file(&list.items, file_str).await
+}
+
+async fn write_json_to_file<T: Serialize>(items: &[T], path: &str) -> Result<()> {
+    let json = serde_json::to_string_pretty(items)?;
+    tokio::fs::write(path, json)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to write file: {}", e))?;
+    Ok(())
 }

@@ -1,15 +1,14 @@
 use std::fmt::Debug;
 
-use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope};
 use kube::api::{Patch, PatchParams};
-use kube::{Api, Client, Resource};
-use serde::Serialize;
+use kube::{Api, Client};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use tracing::info;
 
 use crate::error::Result;
 use crate::scope::{ApiScope, Cluster, Namespaced};
+use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
 // ---------------------------------------------------------------------------
 // Private core helpers
@@ -41,16 +40,11 @@ where
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::NamespaceResourceScope;
 /// use kube_genops::finalizers::add_finalizer;
 /// use kube_genops::scope::Namespaced;
+/// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
-/// # {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
 /// add_finalizer::<MyCR, _>(
 ///     client,
 ///     Namespaced("my-namespace"),
@@ -67,7 +61,7 @@ pub async fn add_finalizer<T, Scope>(
     finalizer: &str,
 ) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = ()> + DeserializeOwned + Serialize + 'static,
+    T: KubeResource,
     Scope: ApiScope<T>,
 {
     let kind = T::kind(&());
@@ -90,16 +84,11 @@ where
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::NamespaceResourceScope;
 /// use kube_genops::finalizers::remove_finalizers;
 /// use kube_genops::scope::Namespaced;
+/// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
-/// # {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
 /// remove_finalizers::<MyCR, _>(
 ///     client,
 ///     Namespaced("my-namespace"),
@@ -110,7 +99,7 @@ where
 /// ```
 pub async fn remove_finalizers<T, Scope>(client: Client, scope: Scope, name: &str) -> Result<T>
 where
-    T: Clone + Debug + Resource<DynamicType = ()> + DeserializeOwned + Serialize + 'static,
+    T: KubeResource,
     Scope: ApiScope<T>,
 {
     let kind = T::kind(&());
@@ -126,23 +115,17 @@ where
 /// Add a finalizer to a **namespace-scoped** resource.
 ///
 /// Delegates to [`add_finalizer`] with [`Namespaced`] as the scope. The
-/// resource type `T` must implement `Resource<Scope = NamespaceResourceScope>`,
-/// which the compiler enforces — passing a cluster-scoped type is a compile
-/// error.
+/// resource type `T` must implement [`NamespacedResource`], which the compiler
+/// enforces — passing a cluster-scoped type is a compile error.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::NamespaceResourceScope;
 /// use kube_genops::finalizers::add_finalizer_namespaced;
+/// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
-/// # {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
 /// add_finalizer_namespaced::<MyCR>(
 ///     client,
 ///     "my-namespace",
@@ -159,12 +142,7 @@ pub async fn add_finalizer_namespaced<T>(
     finalizer: &str,
 ) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + Serialize
-        + DeserializeOwned
-        + 'static,
+    T: NamespacedResource,
 {
     add_finalizer::<T, _>(client, Namespaced(namespace), name, finalizer).await
 }
@@ -173,21 +151,16 @@ where
 ///
 /// Delegates to [`remove_finalizers`] with [`Namespaced`] as the scope. Sets
 /// `metadata.finalizers` to `null`, unblocking deletion. The resource type
-/// `T` must implement `Resource<Scope = NamespaceResourceScope>`.
+/// `T` must implement [`NamespacedResource`].
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::NamespaceResourceScope;
 /// use kube_genops::finalizers::remove_finalizers_namespaced;
+/// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = NamespaceResourceScope>
-/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
-/// # {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
 /// remove_finalizers_namespaced::<MyCR>(
 ///     client,
 ///     "my-namespace",
@@ -202,12 +175,7 @@ pub async fn remove_finalizers_namespaced<T>(
     name: &str,
 ) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = NamespaceResourceScope>
-        + Serialize
-        + DeserializeOwned
-        + 'static,
+    T: NamespacedResource,
 {
     remove_finalizers::<T, _>(client, Namespaced(namespace), name).await
 }
@@ -219,22 +187,17 @@ where
 /// Add a finalizer to a **cluster-scoped** resource.
 ///
 /// Delegates to [`add_finalizer`] with [`Cluster`] as the scope. The resource
-/// type `T` must implement `Resource<Scope = ClusterResourceScope>`, which the
-/// compiler enforces — passing a namespace-scoped type is a compile error.
+/// type `T` must implement [`ClusterResource`], which the compiler enforces —
+/// passing a namespace-scoped type is a compile error.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::ClusterResourceScope;
 /// use kube_genops::finalizers::add_finalizer_cluster;
+/// use kube_genops::traits::ClusterResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = ClusterResourceScope>
-/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
-/// # {
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()> {
 /// add_finalizer_cluster::<MyCR>(
 ///     client,
 ///     "my-resource",
@@ -245,12 +208,7 @@ where
 /// ```
 pub async fn add_finalizer_cluster<T>(client: Client, name: &str, finalizer: &str) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = ClusterResourceScope>
-        + Serialize
-        + DeserializeOwned
-        + 'static,
+    T: ClusterResource,
 {
     add_finalizer::<T, _>(client, Cluster, name, finalizer).await
 }
@@ -259,21 +217,16 @@ where
 ///
 /// Delegates to [`remove_finalizers`] with [`Cluster`] as the scope. Sets
 /// `metadata.finalizers` to `null`, unblocking deletion. The resource type
-/// `T` must implement `Resource<Scope = ClusterResourceScope>`.
+/// `T` must implement [`ClusterResource`].
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::ClusterResourceScope;
 /// use kube_genops::finalizers::remove_finalizers_cluster;
+/// use kube_genops::traits::ClusterResource;
 ///
-/// # async fn example<MyCR>(client: Client) -> anyhow::Result<()>
-/// # where
-/// #     MyCR: Resource<DynamicType = (), Scope = ClusterResourceScope>
-/// #         + Clone + std::fmt::Debug + serde::Serialize + for<'de> serde::Deserialize<'de> + 'static,
-/// # {
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()> {
 /// remove_finalizers_cluster::<MyCR>(
 ///     client,
 ///     "my-resource",
@@ -283,12 +236,7 @@ where
 /// ```
 pub async fn remove_finalizers_cluster<T>(client: Client, name: &str) -> Result<T>
 where
-    T: Clone
-        + Debug
-        + Resource<DynamicType = (), Scope = ClusterResourceScope>
-        + DeserializeOwned
-        + Serialize
-        + 'static,
+    T: ClusterResource,
 {
     remove_finalizers::<T, _>(client, Cluster, name).await
 }
