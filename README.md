@@ -1,11 +1,12 @@
 # Kube Generic Operations
 
-A reusable library of generic, ergonomic functions for the most common Kubernetes operator patterns. Built on top of [`kube`](https://docs.rs/kube) and [`kube-runtime`](https://docs.rs/kube-runtime), it eliminates boilerplate across operators by providing a single, well tested implementation for each pattern.
+A reusable, ergonomic library that streamlines Kubernetes operator development. By providing generic implementations for the most common operator patterns, it eliminates widespread boilerplate across your codebase. It integrates tightly with the `kube-rs` ecosystem to handle repetitive operational scaffolding, allowing developers to build reliable controllers with significantly less code.
 
 
 ## Architecture Overview
 
-`kube-genops` acts as a middle tier between your controller's core domain logic and the low-level Kubernetes API engine. By moving infrastructure orchestration loops, generic Server-Side Apply (SSA) patterns, and background janitors out of your application binaries, you can focus purely on your business logic.
+`kube-genops` acts as an abstraction layer between your controller's core logic and the low-level Kubernetes API engine. It moves infrastructure orchestration loops, generic Server-Side Apply (SSA) patterns, and background cleanup processes out of your application binaries so you can focus purely on your business logic.
+
 
 ```bash
 +-------------------------------------------------------+
