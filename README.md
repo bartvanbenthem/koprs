@@ -540,22 +540,16 @@ match delete_cluster_resource::<Namespace>(client, "my-resource").await {
 ## Testing
 
 ### Unit tests
-
 Unit tests use `tower_test::mock` to intercept HTTP requests and inject
 hand-crafted JSON responses — no cluster or kubeconfig needed:
-
 ```bash
 cargo test
 ```
-
 Enable log output:
-
 ```bash
 RUST_LOG=kube_genops=debug cargo test -- --nocapture
 ```
-
 Tests are organised one file per module under `src/tests/`:
-
 ```
 src/tests/
 ├── mod.rs
@@ -569,34 +563,27 @@ src/tests/
 ├── traits.rs
 └── error.rs
 ```
-
 To write your own tests, create a mock `(Client, Handle)` pair with
 `tower_test::mock::pair` and serve responses from a background task:
-
 ```rust
 use http::{Request, Response, StatusCode};
 use kube::client::Body;
 use kube::Client;
 use serde_json::json;
 use tower_test::mock;
-
 type MockHandle = mock::Handle<Request<Body>, Response<Body>>;
-
 fn mock_client() -> (Client, MockHandle) {
     let (svc, handle) = mock::pair::<Request<Body>, Response<Body>>();
     (Client::new(svc, "default"), handle)
 }
-
 #[tokio::test]
 async fn my_test() {
     let (client, mut handle) = mock_client();
-
     // Serve the response in a background task — both sides must run
     // concurrently because the client blocks waiting for a response.
     let server = tokio::spawn(async move {
         let (req, send) = handle.next_request().await.unwrap();
         assert_eq!(req.method(), http::Method::GET);
-
         let body = serde_json::to_vec(&json!({
             "apiVersion": "v1",
             "kind": "ConfigMapList",
@@ -604,7 +591,6 @@ async fn my_test() {
             "items": []
         }))
         .unwrap();
-
         send.send_response(
             Response::builder()
                 .status(StatusCode::OK)
@@ -613,22 +599,56 @@ async fn my_test() {
                 .unwrap(),
         );
     });
-
     // Call the function under test using the mock client.
     let result = kube_genops::resources::list_resources::<k8s_openapi::api::core::v1::ConfigMap>(
         client,
     )
     .await
     .unwrap();
-
     assert!(result.items.is_empty());
     server.await.unwrap();
 }
 ```
-
 The mock handle serves requests in FIFO order. Functions that make multiple
 API calls (such as the GC loop: list → delete → patch) require one
 `handle.next_request()` call per request in the correct sequence.
+
+---
+
+### Integration tests
+Integration tests run against a real cluster and are gated behind the
+`integration` feature flag. The test functions are always compiled so type
+errors are caught by `cargo check`, but they only execute when the feature
+is enabled:
+```bash
+# Verify the integration tests compile without a cluster
+cargo test --features integration --test integration --no-run
+# Create a local cluster
+kind create cluster --name kube-genops-test
+# Run
+cargo test --features integration --test integration
+# Tear down
+kind delete cluster --name kube-genops-test
+```
+Each test creates resources with a unique name suffix and cleans up after
+itself, so the suite is safe to run with `--test-threads` greater than one.
+
+---
+
+### CI script
+`cargo-ci.sh` runs all quality checks in sequence — format, type-check,
+unit tests, integration tests, coverage, release build, docs, and audit.
+
+```bash
+./cargo-ci.sh                           # run all steps
+./cargo-ci.sh --fast                    # fmt + check + unit tests only (no coverage)
+./cargo-ci.sh --no-audit                # skip cargo-audit
+./cargo-ci.sh --no-integration          # skip integration tests
+./cargo-ci.sh --no-doc                  # skip cargo doc
+./cargo-ci.sh --no-coverage             # skip llvm-cov coverage report
+./cargo-ci.sh --bench                   # also compile benchmarks (slow, opt-in)
+./cargo-ci.sh --coverage-fail-under=80  # fail if line coverage drops below N%
+```
 
 ---
 

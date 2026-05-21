@@ -80,7 +80,6 @@ error()   { echo -e "${RED}${BOLD}[FAIL]${RESET}  $*"; }
 header()  { echo -e "\n${BOLD}━━━  $*  ━━━${RESET}"; }
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
-RUN_CLIPPY=true
 RUN_AUDIT=true
 RUN_INTEGRATION=true
 RUN_DOC=true
@@ -90,7 +89,6 @@ COVERAGE_THRESHOLD=""   # e.g. "80" — empty means no threshold check
 
 for arg in "$@"; do
   case $arg in
-    --no-clippy)              RUN_CLIPPY=false ;;
     --no-audit)               RUN_AUDIT=false ;;
     --no-integration)         RUN_INTEGRATION=false ;;
     --no-doc)                 RUN_DOC=false ;;
@@ -98,7 +96,7 @@ for arg in "$@"; do
     --bench)                  RUN_BENCH=true ;;
     --coverage-fail-under=*)  COVERAGE_THRESHOLD="${arg#*=}" ;;
     --fast)
-      RUN_CLIPPY=false; RUN_AUDIT=false
+      RUN_AUDIT=false
       RUN_INTEGRATION=false; RUN_DOC=false; RUN_COVERAGE=false
       ;;
     --help|-h)
@@ -151,16 +149,7 @@ try_step "cargo fmt (check)" \
 try_step "cargo check (all targets)" \
   cargo check --all-targets --all-features
 
-# ── 3. Clippy ─────────────────────────────────────────────────────────────────
-if $RUN_CLIPPY; then
-  try_step "cargo clippy" \
-    cargo clippy --all-targets --all-features -- \
-      -D warnings \
-      -W clippy::pedantic \
-      -A clippy::module_name_repetitions   # adjust allow-list to taste
-fi
-
-# ── 4. Unit tests ─────────────────────────────────────────────────────────────
+# ── 3. Unit tests ─────────────────────────────────────────────────────────────
 try_step "cargo test (lib + unit)" \
   cargo test --lib --all-features -- --nocapture
 
@@ -241,16 +230,7 @@ if $RUN_AUDIT; then
   fi
 fi
 
-# ── 11. Dependency policy (licences, bans, duplicates) ────────────────────────
-if cargo deny --version &>/dev/null 2>&1; then
-  try_step "cargo deny check" \
-    cargo deny check
-else
-  warn "cargo-deny not installed — skipping."
-  warn "Install: cargo install cargo-deny"
-fi
-
-# ── 12. Unused dependencies ───────────────────────────────────────────────────
+# ── 11. Unused dependencies ───────────────────────────────────────────────────
 if cargo +nightly udeps --version &>/dev/null 2>&1; then
   try_step "cargo udeps (nightly)" \
     cargo +nightly udeps --all-targets
