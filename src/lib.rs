@@ -14,12 +14,13 @@
 //! ## Quick start
 //!
 //! ```no_run
+//! use kube_genops::error::KubeGenericError;
 //! use kube::Client;
 //! use kube_genops::resources::{apply_namespaced_resource, delete_namespaced_resource};
 //! use k8s_openapi::api::apps::v1::Deployment;
 //!
 //! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! async fn main() -> Result<(), KubeGenericError> {
 //!     let client = Client::try_default().await?;
 //!     let deployment: Deployment = todo!("build your desired state");
 //!

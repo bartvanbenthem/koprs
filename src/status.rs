@@ -50,6 +50,7 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::status::patch_status;
@@ -59,7 +60,7 @@ where
 /// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError>
 /// # where MyCR::DynamicType: Default {
 /// patch_status::<MyCR, _, _>(
 ///     client,
@@ -86,7 +87,13 @@ where
 {
     let ctx = K::DynamicType::default();
     let kind = K::kind(&ctx);
-    info!(%kind, %name, "Patching status");
+
+    // Read the namespace out safely before consuming the scope
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching status"),
+        None => info!(%kind, %name, "Patching status"),
+    }
+
     apply_status_patch(scope.into_api(client), name, status, field_manager).await
 }
 
@@ -114,6 +121,7 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::status::patch_status_namespaced;
 /// use kube_genops::traits::NamespacedResource;
@@ -122,7 +130,7 @@ where
 /// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError>
 /// # where MyCR::DynamicType: Default {
 /// patch_status_namespaced::<MyCR, _>(
 ///     client,
@@ -168,6 +176,7 @@ where
 /// # Examples
 ///
 /// ```no_run
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube_genops::status::patch_status_cluster;
 /// use kube_genops::traits::ClusterResource;
@@ -176,7 +185,7 @@ where
 /// #[derive(Serialize)]
 /// struct MyStatus { ready: bool }
 ///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> anyhow::Result<()>
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError>
 /// # where MyCR::DynamicType: Default {
 /// patch_status_cluster::<MyCR, _>(
 ///     client,

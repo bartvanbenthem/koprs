@@ -5,7 +5,11 @@ A reusable, ergonomic library that streamlines Kubernetes operator development. 
 
 ## Architecture Overview
 
-`kube-genops` acts as an abstraction layer between your controller's core logic and the low-level Kubernetes API engine. It moves infrastructure orchestration loops, generic Server-Side Apply (SSA) patterns, and background cleanup processes out of your application binaries so you can focus purely on your business logic.
+`kube-genops` acts as an opinionated, high-level orchestration framework built directly on top of `kube-rs`. While `kube-rs` provides the type-safe foundations to talk to the Kubernetes API, `kube-genops` abstracts away the repetitive boilerplate required to build production-ready controllers. 
+
+It encapsulates complex infrastructure orchestration loops, robust Server-Side Apply (SSA) patterns, and automated background garbage collection/cleanup processes out of your controller's core codebase. Additionally, it streamlines state synchronization with ready to use watcher logic and provides a strongly typed error handling model that removes the friction of building custom Kubernetes error variants from scratch. Every generic operation comes out of the box with structured, built-in `tracing` instrumentation, giving you deep visibility into your controller's execution paths without additional setup.
+
+By lifting these structural requirements off your shoulders, `kube-genops` leaves you free to focus purely on your custom business logic.
 
 
 ```bash
@@ -49,7 +53,7 @@ A reusable, ergonomic library that streamlines Kubernetes operator development. 
 [dependencies]
 kube-genops = { path = "../kube-genops" }
 # or once published:
-# kube-genops = "0.2.1"
+# kube-genops = "0.3.0"
 ```
 
 ---
@@ -578,13 +582,6 @@ cargo test --features integration --test integration
 # Tear down
 kind delete cluster --name kube-genops-test
 ```
-
-
----
-
-## Related
-
-- [`kube-objstore`](../kube-objstore) — object store client for Kubernetes operators
 
 ---
 

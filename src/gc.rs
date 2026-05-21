@@ -94,13 +94,14 @@ where
 ///
 /// ```no_run
 /// use std::collections::HashSet;
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube::ResourceExt;
 /// use kube_genops::gc::gc_resources;
 /// use kube_genops::scope::Namespaced;
 /// use kube_genops::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> anyhow::Result<()> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
 /// let desired: HashSet<(String, String)> = HashSet::from([
 ///     ("default".to_string(), "my-resource".to_string()),
 /// ]);
@@ -160,11 +161,12 @@ where
 ///
 /// ```no_run
 /// use std::collections::HashSet;
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube::Resource;
 /// use k8s_openapi::api::core::v1::PersistentVolume;
 ///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let desired = HashSet::from(["pv-a".to_string(), "pv-b".to_string()]);
 /// kube_genops::gc::gc_cluster_resources::<PersistentVolume>(
 ///     client,
@@ -206,11 +208,12 @@ where
 ///
 /// ```no_run
 /// use std::collections::HashSet;
+/// use kube_genops::error::KubeGenericError;
 /// use kube::Client;
 /// use kube::Resource;
 /// use k8s_openapi::api::core::v1::PersistentVolumeClaim;
 ///
-/// # async fn example(client: Client) -> anyhow::Result<()> {
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let desired = HashSet::from([
 ///     ("default".to_string(), "pvc-a".to_string()),
 /// ]);

@@ -128,8 +128,8 @@ mod tests {
     }
 
     #[test]
-    fn other_error_wraps_anyhow() {
-        let err = KubeGenericError::Other(anyhow::anyhow!("something failed"));
+    fn internal_error_displays_message() {
+        let err = KubeGenericError::Internal("something failed".to_string());
         assert!(err.to_string().contains("something failed"));
     }
 }
