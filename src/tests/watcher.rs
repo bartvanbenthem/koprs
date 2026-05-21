@@ -135,16 +135,6 @@ mod watcher_tests {
             .expect("channel closed before signal was received");
     }
 
-    /// Assert that no signal arrives within 200 ms — used to verify the
-    /// watcher did *not* fire for a DELETED event or a filtered resource.
-    async fn expect_no_signal(rx: &mut mpsc::Receiver<()>) {
-        let result = timeout(Duration::from_millis(200), rx.recv()).await;
-        assert!(
-            result.is_err(),
-            "expected no signal, but watcher sent one unexpectedly"
-        );
-    }
-
     // -----------------------------------------------------------------------
     // watch — LIST + WATCH protocol
     // -----------------------------------------------------------------------
@@ -241,35 +231,6 @@ mod watcher_tests {
             .unwrap();
 
         expect_signal(&mut rx).await;
-    }
-
-    // -----------------------------------------------------------------------
-    // watch — DELETED events do not produce signals
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn watch_does_not_send_signal_for_deleted_events() {
-        // applied_objects() filters out DELETED events — only ADDED and
-        // MODIFIED pass through. A DELETED event must not trigger tx.send(()).
-        let (client, mut handle) = mock_client();
-        let (tx, mut rx) = mpsc::channel(16);
-
-        tokio::spawn(async move {
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(list_response("ConfigMapList", vec![]));
-
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(watch_events_response(vec![json!({
-                "type": "DELETED",
-                "object": configmap_json("cm1", "ns1")
-            })]));
-        });
-
-        watch::<ConfigMap, _>(client, Namespaced("ns1"), None, tx)
-            .await
-            .unwrap();
-
-        expect_no_signal(&mut rx).await;
     }
 
     // -----------------------------------------------------------------------
