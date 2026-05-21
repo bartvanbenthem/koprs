@@ -422,14 +422,10 @@ async fn test_add_and_remove_namespaced_finalizer() {
         .unwrap();
 
     // Add finalizer
-    let with_fin = add_finalizer_namespaced::<ConfigMap>(
-        client.clone(),
-        ns,
-        &name,
-        "kube-genops/finalizer",
-    )
-    .await
-    .expect("add_finalizer_namespaced failed");
+    let with_fin =
+        add_finalizer_namespaced::<ConfigMap>(client.clone(), ns, &name, "kube-genops/finalizer")
+            .await
+            .expect("add_finalizer_namespaced failed");
 
     assert!(
         with_fin
