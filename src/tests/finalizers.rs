@@ -4,8 +4,8 @@
 mod finalizers_tests {
     use http::{Request, Response, StatusCode};
     use k8s_openapi::api::core::v1::{ConfigMap, Node};
-    use kube::client::Body;
     use kube::Client;
+    use kube::client::Body;
     use serde_json::json;
     use tower_test::mock;
 
@@ -119,14 +119,10 @@ mod finalizers_tests {
             )));
         });
 
-        let result = add_finalizer::<ConfigMap, _>(
-            client,
-            Namespaced("my-ns"),
-            "my-cm",
-            "my-op/cleanup",
-        )
-        .await
-        .unwrap();
+        let result =
+            add_finalizer::<ConfigMap, _>(client, Namespaced("my-ns"), "my-cm", "my-op/cleanup")
+                .await
+                .unwrap();
 
         assert_eq!(
             result.metadata.finalizers.as_deref(),
@@ -144,7 +140,10 @@ mod finalizers_tests {
             assert_eq!(req.method(), http::Method::PATCH);
             let uri = req.uri().to_string();
             assert!(uri.contains("/api/v1/nodes/my-node"), "uri={uri}");
-            assert!(!uri.contains("namespaces"), "unexpected namespace in uri={uri}");
+            assert!(
+                !uri.contains("namespaces"),
+                "unexpected namespace in uri={uri}"
+            );
 
             let body = read_body_json(req).await;
             assert_eq!(body["metadata"]["finalizers"], json!(["my-op/cleanup"]));
@@ -238,10 +237,9 @@ mod finalizers_tests {
             send.send_response(json_response(configmap_json("my-cm", "my-ns", &[])));
         });
 
-        let result =
-            remove_finalizers::<ConfigMap, _>(client, Namespaced("my-ns"), "my-cm")
-                .await
-                .unwrap();
+        let result = remove_finalizers::<ConfigMap, _>(client, Namespaced("my-ns"), "my-cm")
+            .await
+            .unwrap();
 
         assert!(
             result
@@ -319,7 +317,9 @@ mod finalizers_tests {
             send.send_response(json_response(node_json("n1", &[])));
         });
 
-        remove_finalizers_cluster::<Node>(client, "n1").await.unwrap();
+        remove_finalizers_cluster::<Node>(client, "n1")
+            .await
+            .unwrap();
 
         server.await.unwrap();
     }
@@ -344,10 +344,9 @@ mod finalizers_tests {
             )));
         });
 
-        let result =
-            add_finalizer_namespaced::<ConfigMap>(client, "ns1", "cm1", "my-op/cleanup")
-                .await
-                .unwrap();
+        let result = add_finalizer_namespaced::<ConfigMap>(client, "ns1", "cm1", "my-op/cleanup")
+            .await
+            .unwrap();
 
         let fins = result.metadata.finalizers.unwrap();
         assert!(fins.contains(&"existing/fin".to_string()));
@@ -383,8 +382,7 @@ mod finalizers_tests {
             send.send_response(server_error_response());
         });
 
-        let result =
-            remove_finalizers::<ConfigMap, _>(client, Namespaced("ns1"), "cm1").await;
+        let result = remove_finalizers::<ConfigMap, _>(client, Namespaced("ns1"), "cm1").await;
         assert!(result.is_err(), "expected Err on 500, got Ok");
         server.await.unwrap();
     }

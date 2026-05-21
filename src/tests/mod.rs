@@ -1,10 +1,10 @@
 // src/tests/mod.rs
 //! Tests for kube-genops.
-mod resources;
-mod status;
+mod error;
 mod finalizers;
 mod gc;
-mod watcher;
+mod resources;
 mod scope;
+mod status;
 mod traits;
-mod error;
+mod watcher;

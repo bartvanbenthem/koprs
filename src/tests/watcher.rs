@@ -23,8 +23,8 @@ mod watcher_tests {
 
     use http::{Request, Response, StatusCode};
     use k8s_openapi::api::core::v1::{ConfigMap, Node};
-    use kube::client::Body;
     use kube::Client;
+    use kube::client::Body;
     use serde_json::json;
     use tokio::sync::mpsc;
     use tokio::time::timeout;

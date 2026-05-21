@@ -24,8 +24,8 @@ mod resources_tests {
 
     use http::{Request, Response, StatusCode};
     use k8s_openapi::api::core::v1::{ConfigMap, Node};
-    use kube::client::Body;
     use kube::Client;
+    use kube::client::Body;
     use serde_json::json;
     use tokio::time::timeout;
     use tower_test::mock;
@@ -189,15 +189,17 @@ mod resources_tests {
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::PATCH);
             let uri = req.uri().to_string();
-            assert!(uri.contains("/namespaces/my-ns/configmaps/my-cm"), "uri={uri}");
+            assert!(
+                uri.contains("/namespaces/my-ns/configmaps/my-cm"),
+                "uri={uri}"
+            );
             assert!(uri.contains("fieldManager=my-op"), "uri={uri}");
             send.send_response(json_response(configmap_json("my-cm", "my-ns")));
         });
 
-        let result =
-            apply_resource::<ConfigMap, _>(client, Namespaced("my-ns"), &cm, "my-op")
-                .await
-                .unwrap();
+        let result = apply_resource::<ConfigMap, _>(client, Namespaced("my-ns"), &cm, "my-op")
+            .await
+            .unwrap();
         assert_eq!(result.metadata.name.unwrap(), "my-cm");
         server.await.unwrap();
     }
@@ -235,7 +237,11 @@ mod resources_tests {
         let server = tokio::spawn(async move {
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::PATCH);
-            assert!(req.uri().to_string().contains("/namespaces/ns1/configmaps/cm1"));
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/ns1/configmaps/cm1")
+            );
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
@@ -255,11 +261,16 @@ mod resources_tests {
             assert_eq!(req.method(), http::Method::PATCH);
             let uri = req.uri().to_string();
             assert!(uri.contains("/api/v1/nodes/n1"), "uri={uri}");
-            assert!(!uri.contains("namespaces"), "unexpected namespace segment in uri={uri}");
+            assert!(
+                !uri.contains("namespaces"),
+                "unexpected namespace segment in uri={uri}"
+            );
             send.send_response(json_response(node_json("n1")));
         });
 
-        apply_cluster_resource::<Node>(client, &node, "op").await.unwrap();
+        apply_cluster_resource::<Node>(client, &node, "op")
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 
@@ -274,15 +285,18 @@ mod resources_tests {
         let server = tokio::spawn(async move {
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::DELETE);
-            assert!(req.uri().to_string().contains("/namespaces/my-ns/configmaps/cm1"));
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/my-ns/configmaps/cm1")
+            );
             // Kubernetes responds with the deleted object or a Status 200.
             send.send_response(json_response(configmap_json("cm1", "my-ns")));
         });
 
-        let deleted =
-            delete_resource::<ConfigMap, _>(client, Namespaced("my-ns"), "cm1")
-                .await
-                .unwrap();
+        let deleted = delete_resource::<ConfigMap, _>(client, Namespaced("my-ns"), "cm1")
+            .await
+            .unwrap();
         assert!(deleted);
         server.await.unwrap();
     }
@@ -296,10 +310,9 @@ mod resources_tests {
             send.send_response(not_found_response());
         });
 
-        let deleted =
-            delete_resource::<ConfigMap, _>(client, Namespaced("my-ns"), "missing")
-                .await
-                .unwrap();
+        let deleted = delete_resource::<ConfigMap, _>(client, Namespaced("my-ns"), "missing")
+            .await
+            .unwrap();
         assert!(!deleted);
         server.await.unwrap();
     }
@@ -313,8 +326,7 @@ mod resources_tests {
             send.send_response(server_error_response());
         });
 
-        let result =
-            delete_resource::<ConfigMap, _>(client, Namespaced("my-ns"), "cm1").await;
+        let result = delete_resource::<ConfigMap, _>(client, Namespaced("my-ns"), "cm1").await;
         assert!(result.is_err());
         server.await.unwrap();
     }
@@ -330,10 +342,11 @@ mod resources_tests {
         let server = tokio::spawn(async move {
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::DELETE);
-            assert!(req
-                .uri()
-                .to_string()
-                .contains("/namespaces/ns1/configmaps/cm1"));
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/ns1/configmaps/cm1")
+            );
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
@@ -371,7 +384,9 @@ mod resources_tests {
             send.send_response(not_found_response());
         });
 
-        let ok = delete_cluster_resource::<Node>(client, "ghost").await.unwrap();
+        let ok = delete_cluster_resource::<Node>(client, "ghost")
+            .await
+            .unwrap();
         assert!(!ok);
         server.await.unwrap();
     }
@@ -424,16 +439,19 @@ mod resources_tests {
             let uri = req.uri().to_string();
             // kube encodes the label selector as a query parameter
             assert!(
-                uri.contains("labelSelector=app%3Dmy-op") || uri.contains("labelSelector=app=my-op"),
+                uri.contains("labelSelector=app%3Dmy-op")
+                    || uri.contains("labelSelector=app=my-op"),
                 "uri={uri}"
             );
-            send.send_response(json_response(single_configmap_list("cm-labeled", "default")));
+            send.send_response(json_response(single_configmap_list(
+                "cm-labeled",
+                "default",
+            )));
         });
 
-        let list =
-            list_resources_by_label::<ConfigMap>(client, "app=my-op")
-                .await
-                .unwrap();
+        let list = list_resources_by_label::<ConfigMap>(client, "app=my-op")
+            .await
+            .unwrap();
         assert_eq!(list.items.len(), 1);
         server.await.unwrap();
     }
@@ -448,7 +466,11 @@ mod resources_tests {
 
         let server = tokio::spawn(async move {
             let (req, send) = handle.next_request().await.unwrap();
-            assert!(req.uri().to_string().contains("/namespaces/prod/configmaps"));
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/prod/configmaps")
+            );
             send.send_response(json_response(single_configmap_list("cm-prod", "prod")));
         });
 
@@ -482,9 +504,13 @@ mod resources_tests {
             send.send_response(json_response(body));
         });
 
-        let names =
-            list_resource_names::<ConfigMap>(client, "app=op").await.unwrap();
-        assert_eq!(names, HashSet::from(["alpha".to_string(), "beta".to_string()]));
+        let names = list_resource_names::<ConfigMap>(client, "app=op")
+            .await
+            .unwrap();
+        assert_eq!(
+            names,
+            HashSet::from(["alpha".to_string(), "beta".to_string()])
+        );
         server.await.unwrap();
     }
 
@@ -497,8 +523,9 @@ mod resources_tests {
             send.send_response(json_response(empty_configmap_list()));
         });
 
-        let names =
-            list_resource_names::<ConfigMap>(client, "app=op").await.unwrap();
+        let names = list_resource_names::<ConfigMap>(client, "app=op")
+            .await
+            .unwrap();
         assert!(names.is_empty());
         server.await.unwrap();
     }
@@ -541,11 +568,7 @@ mod resources_tests {
         // Use a tiny interval so the test is fast.
         let items = timeout(
             Duration::from_secs(5),
-            wait_for_resources_namespaced::<ConfigMap>(
-                client,
-                "ns1",
-                Duration::from_millis(10),
-            ),
+            wait_for_resources_namespaced::<ConfigMap>(client, "ns1", Duration::from_millis(10)),
         )
         .await
         .expect("timed out waiting for resources")
@@ -568,10 +591,9 @@ mod resources_tests {
             send.send_response(json_response(single_node_list("node1")));
         });
 
-        let items =
-            wait_for_resources_cluster::<Node>(client, Duration::from_millis(10))
-                .await
-                .unwrap();
+        let items = wait_for_resources_cluster::<Node>(client, Duration::from_millis(10))
+            .await
+            .unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].metadata.name.as_deref(), Some("node1"));
         server.await.unwrap();
@@ -680,8 +702,7 @@ mod resources_tests {
             send.send_response(server_error_response());
         });
 
-        let result =
-            apply_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op").await;
+        let result = apply_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op").await;
         assert!(result.is_err());
         server.await.unwrap();
     }

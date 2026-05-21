@@ -4,8 +4,8 @@
 mod gc_tests {
     use http::{Request, Response, StatusCode};
     use k8s_openapi::api::core::v1::{ConfigMap, Node};
-    use kube::client::Body;
     use kube::Client;
+    use kube::client::Body;
     use serde_json::json;
     use tower_test::mock;
 
@@ -175,9 +175,9 @@ mod gc_tests {
         let server = tokio::spawn(async move {
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::GET);
-            send.send_response(json_response(configmap_list(vec![
-                configmap_json("cm-keep", "ns1"),
-            ])));
+            send.send_response(json_response(configmap_list(vec![configmap_json(
+                "cm-keep", "ns1",
+            )])));
             // No DELETE or PATCH should follow — only one request total.
         });
 
@@ -202,16 +202,21 @@ mod gc_tests {
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::GET);
             let uri = req.uri().to_string();
-            assert!(uri.contains("labelSelector"), "expected label selector in list call, uri={uri}");
-            send.send_response(json_response(configmap_list(vec![
-                configmap_json("orphan", "ns1"),
-            ])));
+            assert!(
+                uri.contains("labelSelector"),
+                "expected label selector in list call, uri={uri}"
+            );
+            send.send_response(json_response(configmap_list(vec![configmap_json(
+                "orphan", "ns1",
+            )])));
 
             // 2. DELETE call for the orphaned resource.
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::DELETE);
             assert!(
-                req.uri().to_string().contains("/namespaces/ns1/configmaps/orphan"),
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/ns1/configmaps/orphan"),
                 "uri={}",
                 req.uri()
             );
@@ -259,7 +264,11 @@ mod gc_tests {
             // 2. DELETE for "orphan" only (no call for "keep").
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::DELETE);
-            assert!(req.uri().to_string().contains("orphan"), "uri={}", req.uri());
+            assert!(
+                req.uri().to_string().contains("orphan"),
+                "uri={}",
+                req.uri()
+            );
             send.send_response(json_response(configmap_json("orphan", "ns1")));
 
             // 3. clear_finalizers PATCH after delete.
@@ -302,7 +311,10 @@ mod gc_tests {
             assert!(uri.contains("terminating"), "uri={uri}");
             let body = read_body_json(req).await;
             assert_eq!(body["metadata"]["finalizers"], serde_json::Value::Null);
-            send.send_response(json_response(terminating_configmap_json("terminating", "ns1")));
+            send.send_response(json_response(terminating_configmap_json(
+                "terminating",
+                "ns1",
+            )));
         });
 
         // Resource is not desired (would normally trigger deletion), but because
@@ -325,9 +337,9 @@ mod gc_tests {
         let server = tokio::spawn(async move {
             // 1. List
             let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_list(vec![
-                configmap_json("gone", "ns1"),
-            ])));
+            send.send_response(json_response(configmap_list(vec![configmap_json(
+                "gone", "ns1",
+            )])));
 
             // 2. DELETE → 404 (someone else already deleted it).
             let (req, send) = handle.next_request().await.unwrap();
@@ -355,9 +367,9 @@ mod gc_tests {
         let server = tokio::spawn(async move {
             // 1. List
             let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_list(vec![
-                configmap_json("cm1", "ns1"),
-            ])));
+            send.send_response(json_response(configmap_list(vec![configmap_json(
+                "cm1", "ns1",
+            )])));
 
             // 2. DELETE → 500
             let (_req, send) = handle.next_request().await.unwrap();
@@ -404,7 +416,10 @@ mod gc_tests {
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::GET);
             let uri = req.uri().to_string();
-            assert!(!uri.contains("namespaces"), "unexpected namespace in list uri={uri}");
+            assert!(
+                !uri.contains("namespaces"),
+                "unexpected namespace in list uri={uri}"
+            );
             send.send_response(json_response(node_list(vec![node_json("orphan-node")])));
 
             // 2. DELETE
@@ -457,9 +472,9 @@ mod gc_tests {
             //    Api::namespaced — so the list URI uses the all-namespaces path).
             let (req, send) = handle.next_request().await.unwrap();
             assert_eq!(req.method(), http::Method::GET);
-            send.send_response(json_response(configmap_list(vec![
-                configmap_json("orphan", "prod"),
-            ])));
+            send.send_response(json_response(configmap_list(vec![configmap_json(
+                "orphan", "prod",
+            )])));
 
             // 2. DELETE via namespaced API.
             let (req, send) = handle.next_request().await.unwrap();
@@ -497,9 +512,9 @@ mod gc_tests {
         let server = tokio::spawn(async move {
             // 1. List
             let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_list(vec![
-                configmap_json("orphan", "ns1"),
-            ])));
+            send.send_response(json_response(configmap_list(vec![configmap_json(
+                "orphan", "ns1",
+            )])));
 
             // 2. DELETE succeeds.
             let (_req, send) = handle.next_request().await.unwrap();

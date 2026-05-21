@@ -4,8 +4,8 @@
 mod status_tests {
     use http::{Request, Response, StatusCode};
     use k8s_openapi::api::core::v1::{ConfigMap, Node};
-    use kube::client::Body;
     use kube::Client;
+    use kube::client::Body;
     use serde::Serialize;
     use serde_json::json;
     use tower_test::mock;
@@ -212,10 +212,7 @@ mod status_tests {
                 body["apiVersion"], "v1",
                 "patch body must include apiVersion"
             );
-            assert_eq!(
-                body["kind"], "ConfigMap",
-                "patch body must include kind"
-            );
+            assert_eq!(body["kind"], "ConfigMap", "patch body must include kind");
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
@@ -425,22 +422,14 @@ mod status_tests {
         let server = tokio::spawn(async move {
             let (req, send) = handle.next_request().await.unwrap();
             let uri = req.uri().to_string();
-            assert!(
-                uri.contains("/api/v1/nodes/n1/status"),
-                "uri={uri}"
-            );
+            assert!(uri.contains("/api/v1/nodes/n1/status"), "uri={uri}");
             assert!(!uri.contains("namespaces"), "uri={uri}");
             send.send_response(json_response(node_json("n1")));
         });
 
-        patch_status_cluster::<Node, _>(
-            client,
-            "n1",
-            SimpleStatus { ready: true },
-            "my-op",
-        )
-        .await
-        .unwrap();
+        patch_status_cluster::<Node, _>(client, "n1", SimpleStatus { ready: true }, "my-op")
+            .await
+            .unwrap();
 
         server.await.unwrap();
     }
@@ -459,14 +448,9 @@ mod status_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        patch_status_cluster::<Node, _>(
-            client,
-            "n1",
-            SimpleStatus { ready: true },
-            "cluster-op",
-        )
-        .await
-        .unwrap();
+        patch_status_cluster::<Node, _>(client, "n1", SimpleStatus { ready: true }, "cluster-op")
+            .await
+            .unwrap();
 
         server.await.unwrap();
     }
