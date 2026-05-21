@@ -53,7 +53,7 @@ By lifting these structural requirements off your shoulders, `kube-genops` leave
 [dependencies]
 kube-genops = { path = "../kube-genops" }
 # or once published:
-# kube-genops = "0.3.0"
+# kube-genops = "0.3.1"
 ```
 
 ---
