@@ -41,5 +41,4 @@ pub mod watcher;
 pub use error::KubeGenericError;
 
 #[cfg(test)]
-#[path = "tests/mod.rs"]
 mod tests;
