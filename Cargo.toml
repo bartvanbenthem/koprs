@@ -2,8 +2,12 @@
 name = "kube-genops"
 version = "0.3.1"
 edition = "2024"
-description = "Generic Kubernetes resource operations for Rust operators"
+description = "A reusable, ergonomic library that streamlines Kubernetes operator development, allowing developers to build controllers with significantly less code."
 license = "MIT"
+repository = "https://github.com/bartvanbenthem/kube-genops"
+readme = "README.md"
+keywords = ["kubernetes", "kube-rs", "operators", "controllers"]
+categories = ["api-bindings"]
 
 [lib]
 name = "kube_genops"
