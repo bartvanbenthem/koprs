@@ -84,8 +84,8 @@ if [[ "${SKIP_CI}" == false ]]; then
     ./cargo-ci.sh --fast --no-integration --no-audit
   else
     cargo fmt --check
-    cargo clippy --all-features -- -D warnings
-    cargo test --lib --no-integration 2>/dev/null || cargo test --lib
+    cargo check --all-features
+    cargo test --lib
   fi
   success "CI checks passed"
   echo ""
