@@ -1,4 +1,4 @@
-# Kubernetes Generic Operations
+# Kubernetes Operator Framework
 
 The monorepo behind `koprs`, a high-level Kubernetes operator framework for Rust.
 
@@ -21,7 +21,7 @@ tooling for CRDs and RBAC.
 ## Workspace layout
 
 ```
-kube-genops/
+operator-framework-rs/
 ├── Cargo.toml                  # workspace manifest
 ├── Cargo.lock
 └── crates/
@@ -63,9 +63,9 @@ cargo build -p koprs
 cargo test
 
 # integration tests
-kind create cluster --name kube-genops-test
+kind create cluster --name operator-framework-rs-test
 cargo test --features integration --test integration
-kind delete cluster --name kube-genops-test
+kind delete cluster --name operator-framework-rs-test
 ```
 
 ### CI

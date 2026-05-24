@@ -6,7 +6,7 @@ resolver = "2"
 version = "0.5.2"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/bartvanbenthem/kube-genops"
+repository = "https://github.com/bartvanbenthem/operator-framework-rs"
 
 [workspace.dependencies]
 kube = { version = "0.95", features = ["runtime", "derive"] }
