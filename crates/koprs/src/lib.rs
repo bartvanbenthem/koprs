@@ -1,4 +1,4 @@
-//! # kube-genops
+//! # koprs
 //!
 //! Generic, reusable Kubernetes resource utilities for Rust operators.
 //!
@@ -14,9 +14,9 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use kube_genops::error::KubeGenericError;
+//! use koprs::error::KubeGenericError;
 //! use kube::Client;
-//! use kube_genops::resources::{apply_namespaced_resource, delete_namespaced_resource};
+//! use koprs::resources::{apply_namespaced_resource, delete_namespaced_resource};
 //! use k8s_openapi::api::apps::v1::Deployment;
 //!
 //! #[tokio::main]

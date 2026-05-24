@@ -1,5 +1,5 @@
 // src/tests/mod.rs
-//! Tests for kube-genops.
+//! Tests for koprs.
 mod error;
 mod finalizers;
 mod gc;

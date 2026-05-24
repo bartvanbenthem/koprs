@@ -1,4 +1,4 @@
-//! Integration tests for kube-genops.
+//! Integration tests for koprs.
 //!
 //! These tests run against a real Kubernetes cluster (local `kind` is recommended).
 //!
@@ -10,13 +10,13 @@
 //! apt install kind           # Linux
 //!
 //! # Create a cluster
-//! kind create cluster --name kube-genops-test
+//! kind create cluster --name koprs-test
 //!
 //! # Run the integration tests
 //! cargo test --features integration --test integration
 //!
 //! # Tear down afterwards
-//! kind delete cluster --name kube-genops-test
+//! kind delete cluster --name koprs-test
 //! ```
 //!
 //! Tests are fully isolated: each test creates resources with a unique suffix
@@ -26,20 +26,20 @@
 
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
 use k8s_openapi::api::rbac::v1::ClusterRole;
-use kube::api::ListParams;
-use kube::core::ObjectMeta;
-use kube::{Api, Client, ResourceExt};
-use kube_genops::finalizers::{
+use koprs::finalizers::{
     add_finalizer_cluster, add_finalizer_namespaced, remove_finalizers_cluster,
     remove_finalizers_namespaced,
 };
-use kube_genops::gc::{gc_cluster_resources, gc_namespaced_resources};
-use kube_genops::resources::{
+use koprs::gc::{gc_cluster_resources, gc_namespaced_resources};
+use koprs::resources::{
     apply_cluster_resource, apply_namespaced_resource, delete_cluster_resource,
     delete_namespaced_resource, ensure_namespace, list_namespaced_resources,
     list_resources_by_label,
 };
-use kube_genops::status::{patch_status_cluster, patch_status_namespaced};
+use koprs::status::{patch_status_cluster, patch_status_namespaced};
+use kube::api::ListParams;
+use kube::core::ObjectMeta;
+use kube::{Api, Client, ResourceExt};
 use serde::{Deserialize, Serialize};
 
 // -------------------------------------------------------------------------
@@ -65,7 +65,7 @@ async fn client() -> Client {
 fn configmap(name: &str, namespace: &str, label: Option<&str>) -> ConfigMap {
     let mut labels = std::collections::BTreeMap::new();
     if let Some(l) = label {
-        labels.insert("kube-genops-test".to_string(), l.to_string());
+        labels.insert("koprs-test".to_string(), l.to_string());
     }
     ConfigMap {
         metadata: ObjectMeta {
@@ -85,7 +85,7 @@ fn configmap(name: &str, namespace: &str, label: Option<&str>) -> ConfigMap {
 fn cluster_role(name: &str, label: Option<&str>) -> ClusterRole {
     let mut labels = std::collections::BTreeMap::new();
     if let Some(l) = label {
-        labels.insert("kube-genops-test".to_string(), l.to_string());
+        labels.insert("koprs-test".to_string(), l.to_string());
     }
     ClusterRole {
         metadata: ObjectMeta {
@@ -123,12 +123,12 @@ async fn test_ensure_namespace_creates_and_is_idempotent() {
     let name = uid("genops-ns");
 
     // First call — creates
-    ensure_namespace(client.clone(), &name, "kube-genops-test")
+    ensure_namespace(client.clone(), &name, "koprs-test")
         .await
         .expect("ensure_namespace failed on first call");
 
     // Second call — idempotent (SSA, so no conflict)
-    ensure_namespace(client.clone(), &name, "kube-genops-test")
+    ensure_namespace(client.clone(), &name, "koprs-test")
         .await
         .expect("ensure_namespace failed on second call");
 
@@ -154,7 +154,7 @@ async fn test_apply_and_delete_namespaced_configmap() {
     let cm = configmap(&name, ns, None);
 
     // Apply
-    apply_namespaced_resource(client.clone(), ns, &cm, "kube-genops-test")
+    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
         .await
         .expect("apply_namespaced_resource failed");
 
@@ -184,11 +184,11 @@ async fn test_apply_namespaced_is_idempotent() {
     let name = uid("genops-cm-idem");
     let cm = configmap(&name, ns, None);
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "kube-genops-test")
+    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
         .await
         .expect("first apply failed");
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "kube-genops-test")
+    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
         .await
         .expect("second apply failed — SSA must be idempotent");
 
@@ -209,7 +209,7 @@ async fn test_apply_and_delete_cluster_role() {
     let cr = cluster_role(&name, None);
 
     // Apply
-    apply_cluster_resource(client.clone(), &cr, "kube-genops-test")
+    apply_cluster_resource(client.clone(), &cr, "koprs-test")
         .await
         .expect("apply_cluster_resource failed");
 
@@ -238,11 +238,11 @@ async fn test_apply_cluster_resource_is_idempotent() {
     let name = uid("genops-cr-idem");
     let cr = cluster_role(&name, None);
 
-    apply_cluster_resource(client.clone(), &cr, "kube-genops-test")
+    apply_cluster_resource(client.clone(), &cr, "koprs-test")
         .await
         .expect("first apply_cluster_resource failed");
 
-    apply_cluster_resource(client.clone(), &cr, "kube-genops-test")
+    apply_cluster_resource(client.clone(), &cr, "koprs-test")
         .await
         .expect("second apply_cluster_resource failed — SSA must be idempotent");
 
@@ -263,7 +263,7 @@ async fn test_list_namespaced_resources() {
     let name = uid("genops-list");
     let cm = configmap(&name, ns, None);
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "kube-genops-test")
+    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
         .await
         .unwrap();
 
@@ -289,11 +289,11 @@ async fn test_list_resources_by_label() {
     let name = uid("genops-labeled");
     let cm = configmap(&name, ns, Some(&label_value));
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "kube-genops-test")
+    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
         .await
         .unwrap();
 
-    let selector = format!("kube-genops-test={}", label_value);
+    let selector = format!("koprs-test={}", label_value);
     let list = list_resources_by_label::<ConfigMap>(client.clone(), &selector)
         .await
         .expect("list_resources_by_label failed");
@@ -321,7 +321,7 @@ async fn test_patch_status_namespaced() {
     let name = uid("genops-status");
     let cm = configmap(&name, ns, None);
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "kube-genops-test")
+    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
         .await
         .unwrap();
 
@@ -336,7 +336,7 @@ async fn test_patch_status_namespaced() {
             ready: true,
             message: "integration test".to_string(),
         },
-        "kube-genops-test",
+        "koprs-test",
     )
     .await;
 
@@ -345,7 +345,7 @@ async fn test_patch_status_namespaced() {
     // error, which would surface as a non-Api error variant.
     match result {
         Ok(_) => {}
-        Err(kube_genops::error::KubeGenericError::Kube(kube::Error::Api(e))) => {
+        Err(koprs::error::KubeGenericError::Kube(kube::Error::Api(e))) => {
             // 404 = no /status subresource, 422 = schema validation — both
             // are server-side rejections, not client-side bugs.
             assert!(
@@ -373,7 +373,7 @@ async fn test_patch_status_cluster() {
     let name = uid("genops-cr-status");
     let cr = cluster_role(&name, None);
 
-    apply_cluster_resource(client.clone(), &cr, "kube-genops-test")
+    apply_cluster_resource(client.clone(), &cr, "koprs-test")
         .await
         .unwrap();
 
@@ -384,13 +384,13 @@ async fn test_patch_status_cluster() {
             ready: false,
             message: "cluster status test".to_string(),
         },
-        "kube-genops-test",
+        "koprs-test",
     )
     .await;
 
     match result {
         Ok(_) => {}
-        Err(kube_genops::error::KubeGenericError::Kube(kube::Error::Api(e))) => {
+        Err(koprs::error::KubeGenericError::Kube(kube::Error::Api(e))) => {
             assert!(
                 e.code == 404 || e.code == 405 || e.code == 422,
                 "unexpected API error code {}: {}",
@@ -417,13 +417,13 @@ async fn test_add_and_remove_namespaced_finalizer() {
     let name = uid("genops-fin");
     let cm = configmap(&name, ns, None);
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "kube-genops-test")
+    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
         .await
         .unwrap();
 
     // Add finalizer
     let with_fin =
-        add_finalizer_namespaced::<ConfigMap>(client.clone(), ns, &name, "kube-genops/finalizer")
+        add_finalizer_namespaced::<ConfigMap>(client.clone(), ns, &name, "koprs/finalizer")
             .await
             .expect("add_finalizer_namespaced failed");
 
@@ -433,7 +433,7 @@ async fn test_add_and_remove_namespaced_finalizer() {
             .finalizers
             .as_deref()
             .unwrap_or_default()
-            .contains(&"kube-genops/finalizer".to_string()),
+            .contains(&"koprs/finalizer".to_string()),
         "Finalizer not present after add"
     );
 
@@ -467,15 +467,14 @@ async fn test_add_and_remove_cluster_finalizer() {
     let name = uid("genops-cfin");
     let cr = cluster_role(&name, None);
 
-    apply_cluster_resource(client.clone(), &cr, "kube-genops-test")
+    apply_cluster_resource(client.clone(), &cr, "koprs-test")
         .await
         .unwrap();
 
     // Add finalizer
-    let with_fin =
-        add_finalizer_cluster::<ClusterRole>(client.clone(), &name, "kube-genops/finalizer")
-            .await
-            .expect("add_finalizer_cluster failed");
+    let with_fin = add_finalizer_cluster::<ClusterRole>(client.clone(), &name, "koprs/finalizer")
+        .await
+        .expect("add_finalizer_cluster failed");
 
     assert!(
         with_fin
@@ -483,7 +482,7 @@ async fn test_add_and_remove_cluster_finalizer() {
             .finalizers
             .as_deref()
             .unwrap_or_default()
-            .contains(&"kube-genops/finalizer".to_string()),
+            .contains(&"koprs/finalizer".to_string()),
         "Finalizer not present after add"
     );
 
@@ -505,7 +504,7 @@ async fn test_add_and_remove_cluster_finalizer() {
 async fn test_gc_cluster_resources_deletes_orphans() {
     let client = client().await;
     let label = uid("gc-cluster");
-    let selector = format!("kube-genops-test={}", label);
+    let selector = format!("koprs-test={}", label);
 
     let keep = uid("genops-gc-keep");
     let orphan = uid("genops-gc-orphan");
@@ -514,14 +513,14 @@ async fn test_gc_cluster_resources_deletes_orphans() {
     apply_cluster_resource(
         client.clone(),
         &cluster_role(&keep, Some(&label)),
-        "kube-genops-test",
+        "koprs-test",
     )
     .await
     .unwrap();
     apply_cluster_resource(
         client.clone(),
         &cluster_role(&orphan, Some(&label)),
-        "kube-genops-test",
+        "koprs-test",
     )
     .await
     .unwrap();
@@ -563,7 +562,7 @@ async fn test_gc_namespaced_resources_deletes_orphans() {
     let client = client().await;
     let ns = "default";
     let label = uid("gc-ns");
-    let selector = format!("kube-genops-test={}", label);
+    let selector = format!("koprs-test={}", label);
 
     let keep = uid("genops-gc-ns-keep");
     let orphan = uid("genops-gc-ns-orphan");
@@ -572,7 +571,7 @@ async fn test_gc_namespaced_resources_deletes_orphans() {
         client.clone(),
         ns,
         &configmap(&keep, ns, Some(&label)),
-        "kube-genops-test",
+        "koprs-test",
     )
     .await
     .unwrap();
@@ -580,7 +579,7 @@ async fn test_gc_namespaced_resources_deletes_orphans() {
         client.clone(),
         ns,
         &configmap(&orphan, ns, Some(&label)),
-        "kube-genops-test",
+        "koprs-test",
     )
     .await
     .unwrap();
@@ -622,7 +621,7 @@ async fn test_gc_does_not_delete_desired_resources() {
     let client = client().await;
     let ns = "default";
     let label = uid("gc-noop");
-    let selector = format!("kube-genops-test={}", label);
+    let selector = format!("koprs-test={}", label);
 
     let name = uid("genops-gc-keep-all");
 
@@ -630,7 +629,7 @@ async fn test_gc_does_not_delete_desired_resources() {
         client.clone(),
         ns,
         &configmap(&name, ns, Some(&label)),
-        "kube-genops-test",
+        "koprs-test",
     )
     .await
     .unwrap();

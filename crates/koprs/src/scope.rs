@@ -11,10 +11,10 @@
 //! # Example
 //!
 //! ```no_run
-//! use kube_genops::error::KubeGenericError;
+//! use koprs::error::KubeGenericError;
 //! use kube::Client;
-//! use kube_genops::scope::{Cluster, Namespaced};
-//! use kube_genops::status::patch_status;
+//! use koprs::scope::{Cluster, Namespaced};
+//! use koprs::status::patch_status;
 //! use serde::Serialize;
 //!
 //! #[derive(Serialize)]
@@ -41,9 +41,9 @@ use serde::de::DeserializeOwned;
 /// # Example
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
-/// use kube_genops::scope::Cluster;
-/// use kube_genops::status::patch_status;
+/// use koprs::error::KubeGenericError;
+/// use koprs::scope::Cluster;
+/// use koprs::status::patch_status;
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]
@@ -68,9 +68,9 @@ pub struct Cluster;
 /// # Example
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
-/// use kube_genops::scope::Namespaced;
-/// use kube_genops::status::patch_status;
+/// use koprs::error::KubeGenericError;
+/// use koprs::scope::Namespaced;
+/// use koprs::status::patch_status;
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]

@@ -22,9 +22,9 @@ use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::ensure_namespace;
+/// use koprs::resources::ensure_namespace;
 ///
 /// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// ensure_namespace(client, "my-namespace", "my-operator").await?;
@@ -84,11 +84,11 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::apply_resource;
-/// use kube_genops::scope::Namespaced;
-/// use kube_genops::traits::NamespacedResource;
+/// use koprs::resources::apply_resource;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client, resource: MyCR) -> Result<(), KubeGenericError>
 /// # where
@@ -133,11 +133,11 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::delete_resource;
-/// use kube_genops::scope::Namespaced;
-/// use kube_genops::traits::NamespacedResource;
+/// use koprs::resources::delete_resource;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
@@ -175,10 +175,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::apply_cluster_resource;
-/// use kube_genops::traits::ClusterResource;
+/// use koprs::resources::apply_cluster_resource;
+/// use koprs::traits::ClusterResource;
 ///
 /// # async fn example<MyCR>(client: Client, resource: MyCR) -> Result<(), KubeGenericError>
 /// # where
@@ -204,10 +204,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::delete_cluster_resource;
-/// use kube_genops::traits::ClusterResource;
+/// use koprs::resources::delete_cluster_resource;
+/// use koprs::traits::ClusterResource;
 ///
 /// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
@@ -233,10 +233,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::apply_namespaced_resource;
-/// use kube_genops::traits::NamespacedResource;
+/// use koprs::resources::apply_namespaced_resource;
+/// use koprs::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client, resource: MyCR) -> Result<(), KubeGenericError>
 /// # where
@@ -263,10 +263,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::delete_namespaced_resource;
-/// use kube_genops::traits::NamespacedResource;
+/// use koprs::resources::delete_namespaced_resource;
+/// use koprs::traits::NamespacedResource;
 ///
 /// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
@@ -296,10 +296,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
-/// use kube_genops::resources::list_resources;
+/// use koprs::resources::list_resources;
 ///
 /// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let pods = list_resources::<Pod>(client).await?;
@@ -319,10 +319,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
-/// use kube_genops::resources::list_resources_by_label;
+/// use koprs::resources::list_resources_by_label;
 ///
 /// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let pods = list_resources_by_label::<Pod>(client, "app=my-operator").await?;
@@ -346,10 +346,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
-/// use kube_genops::resources::list_namespaced_resources;
+/// use koprs::resources::list_namespaced_resources;
 ///
 /// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let pods = list_namespaced_resources::<Pod>(client, "my-namespace").await?;
@@ -370,10 +370,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
-/// use kube_genops::resources::list_resource_names;
+/// use koprs::resources::list_resource_names;
 ///
 /// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// let names = list_resource_names::<Pod>(client, "app=my-operator").await?;
@@ -406,11 +406,11 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::wait_for_resources;
-/// use kube_genops::scope::Namespaced;
-/// use kube_genops::traits::NamespacedResource;
+/// use koprs::resources::wait_for_resources;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
 /// use std::time::Duration;
 ///
 /// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
@@ -473,10 +473,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::wait_for_resources_namespaced;
-/// use kube_genops::traits::NamespacedResource;
+/// use koprs::resources::wait_for_resources_namespaced;
+/// use koprs::traits::NamespacedResource;
 /// use std::time::Duration;
 ///
 /// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
@@ -508,10 +508,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::wait_for_resources_cluster;
-/// use kube_genops::traits::ClusterResource;
+/// use koprs::resources::wait_for_resources_cluster;
+/// use koprs::traits::ClusterResource;
 /// use std::time::Duration;
 ///
 /// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
@@ -574,10 +574,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::make_object_refs;
-/// use kube_genops::scope::Namespaced;
+/// use koprs::resources::make_object_refs;
+/// use koprs::scope::Namespaced;
 ///
 /// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
@@ -623,13 +623,13 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::make_object_refs_namespaced;
+/// use koprs::resources::make_object_refs_namespaced;
 ///
 /// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
-/// #     MyCR: kube_genops::traits::NamespacedResource,
+/// #     MyCR: koprs::traits::NamespacedResource,
 /// # {
 /// let refs = make_object_refs_namespaced::<MyCR>(client, "my-namespace").await?;
 /// # Ok(())
@@ -662,13 +662,13 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::resources::make_object_refs_cluster;
+/// use koprs::resources::make_object_refs_cluster;
 ///
 /// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
 /// # where
-/// #     MyCR: kube_genops::traits::ClusterResource,
+/// #     MyCR: koprs::traits::ClusterResource,
 /// # {
 /// let refs = make_object_refs_cluster::<MyCR>(client).await?;
 /// # Ok(())
@@ -706,10 +706,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
 /// use k8s_openapi::api::core::v1::Pod;
-/// use kube_genops::resources::fetch_and_write_to_file;
+/// use koprs::resources::fetch_and_write_to_file;
 ///
 /// # async fn example(client: Client) -> Result<(), KubeGenericError> {
 /// // Use _ to let the compiler infer the path type automatically
