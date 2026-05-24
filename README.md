@@ -5,11 +5,11 @@ A reusable, ergonomic library that streamlines Kubernetes operator development. 
 
 ## Architecture Overview
 
-`kube-genops` acts as an opinionated, high-level orchestration framework built directly on top of `kube-rs`. While `kube-rs` provides the type-safe foundations to talk to the Kubernetes API, `kube-genops` abstracts away the repetitive boilerplate required to build production-ready controllers. 
+`kube-genops` is an opinionated, high-level orchestration framework built directly on top of `kube` and `kube-runtime`. While kube provides type-safe Kubernetes API bindings and kube-runtime delivers the controller primitives, kube-genops abstracts away the repetitive boilerplate required to build production ready controllers.
 
 It encapsulates complex infrastructure orchestration loops, robust Server-Side Apply (SSA) patterns, and automated background garbage collection/cleanup processes out of your controller's core codebase. Additionally, it streamlines state synchronization with ready to use watcher logic and provides a strongly typed error handling model that removes the friction of building custom Kubernetes error variants from scratch. Every generic operation comes out of the box with structured, built-in `tracing` instrumentation, giving you deep visibility into your controller's execution paths without additional setup.
 
-By lifting these structural requirements off your shoulders, `kube-genops` leaves you free to focus purely on your custom business logic.
+By lifting these structural requirements off your shoulders, kube-genops leaves you free to focus purely on your custom business logic.
 
 
 ```bash
