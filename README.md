@@ -4,7 +4,7 @@ The monorepo behind `koprs`, a high-level Kubernetes operator framework for Rust
 
 `koprs` is the idiomatic way to build Kubernetes operators in Rust. It is built on top of 
 [`kube`](https://github.com/kube-rs/kube) and `kube-runtime`, providing the opinionated 
-structure and reusable abstractions that production operators need — without forcing you to 
+structure and reusable abstractions that production operators need, without forcing you to 
 reinvent them for every project.
 
 This repository contains the core framework, its proc macros, and the manifest generation 
