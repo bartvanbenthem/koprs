@@ -53,7 +53,7 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 [dependencies]
 koprs = { path = "../koprs" }
 # or once published:
-# koprs = "0.3.7"
+# koprs = "<version>"
 ```
 
 ---
