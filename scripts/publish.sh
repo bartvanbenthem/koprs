@@ -28,12 +28,12 @@ DRY_RUN=false
 SKIP_CI=false
 SINGLE_CRATE=""
 
-for arg in "$@"; do
-  case $arg in
-    --dry-run)       DRY_RUN=true  ;;
-    --skip-ci)       SKIP_CI=true  ;;
-    --crate)         shift; SINGLE_CRATE="${1:-}" ;;
-    --crate=*)       SINGLE_CRATE="${arg#--crate=}" ;;
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --dry-run)   DRY_RUN=true ;;
+    --skip-ci)   SKIP_CI=true ;;
+    --crate)     shift; SINGLE_CRATE="${1:-}" ;;
+    --crate=*)   SINGLE_CRATE="${1#--crate=}" ;;
     --help|-h)
       echo "Usage: $0 [--dry-run] [--skip-ci] [--crate <name>]"
       echo ""
@@ -42,8 +42,9 @@ for arg in "$@"; do
       echo "  --crate <name>     publish a single crate (koprs-derive | koprs | koprs-gen)"
       exit 0
       ;;
-    *) die "unknown argument: $arg" ;;
+    *) die "unknown argument: $1" ;;
   esac
+  shift
 done
 
 # ── repo root ──────────────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ cd "${ROOT_DIR}"
 
 # ── crate publish order ────────────────────────────────────────────────────────
 # Must follow dependency order — each crate must be on crates.io before the
-# next one can reference it as a non-path dependency.
+# next one can reference it as a registry dependency.
 ALL_CRATES=("koprs-derive" "koprs" "koprs-gen")
 
 if [[ -n "${SINGLE_CRATE}" ]]; then
