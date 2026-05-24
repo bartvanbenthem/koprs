@@ -797,6 +797,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "koprs"
+version = "0.3.7"
+dependencies = [
+ "futures",
+ "http",
+ "http-body-util",
+ "k8s-openapi",
+ "kube",
+ "kube-runtime",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower-test",
+ "tracing",
+]
+
+[[package]]
+name = "koprs-derive"
+version = "0.1.0"
+
+[[package]]
+name = "koprs-gen"
+version = "0.1.0"
+
+[[package]]
 name = "kube"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -877,25 +904,6 @@ dependencies = [
  "serde",
  "serde_json",
  "syn",
-]
-
-[[package]]
-name = "kube-genops"
-version = "0.3.7"
-dependencies = [
- "futures",
- "http",
- "http-body-util",
- "k8s-openapi",
- "kube",
- "kube-runtime",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tower-test",
- "tracing",
 ]
 
 [[package]]

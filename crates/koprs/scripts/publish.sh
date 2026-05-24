@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/publish.sh — publish kube-genops to crates.io
+# scripts/publish.sh — publish koprs to crates.io
 #
 # Usage:
 #   ./scripts/publish.sh              # full pre-flight + publish

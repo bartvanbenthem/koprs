@@ -50,11 +50,11 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::scope::Namespaced;
-/// use kube_genops::status::patch_status;
-/// use kube_genops::traits::NamespacedResource;
+/// use koprs::scope::Namespaced;
+/// use koprs::status::patch_status;
+/// use koprs::traits::NamespacedResource;
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]
@@ -121,10 +121,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::status::patch_status_namespaced;
-/// use kube_genops::traits::NamespacedResource;
+/// use koprs::status::patch_status_namespaced;
+/// use koprs::traits::NamespacedResource;
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]
@@ -176,10 +176,10 @@ where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::error::KubeGenericError;
+/// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use kube_genops::status::patch_status_cluster;
-/// use kube_genops::traits::ClusterResource;
+/// use koprs::status::patch_status_cluster;
+/// use koprs::traits::ClusterResource;
 /// use serde::Serialize;
 ///
 /// #[derive(Serialize)]

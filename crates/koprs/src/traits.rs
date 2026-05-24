@@ -5,7 +5,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 
-/// Core Kubernetes resource abstraction used across `kube-genops`.
+/// Core Kubernetes resource abstraction used across `koprs`.
 ///
 /// `KubeResource` represents the minimal set of capabilities required
 /// for a type to be safely used with generic Kubernetes operations such as
@@ -35,7 +35,7 @@ use std::fmt::Debug;
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::traits::KubeResource;
+/// use koprs::traits::KubeResource;
 /// use k8s_openapi::api::core::v1::Pod;
 ///
 /// fn assert_kube_resource<T: KubeResource>() {}
@@ -87,7 +87,7 @@ impl<T> KubeResource for T where
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::traits::NamespacedResource;
+/// use koprs::traits::NamespacedResource;
 /// use k8s_openapi::api::core::v1::Pod;
 ///
 /// fn assert_namespaced<T: NamespacedResource>() {}
@@ -119,7 +119,7 @@ impl<T> NamespacedResource for T where T: KubeResource + Resource<Scope = Namesp
 /// # Examples
 ///
 /// ```no_run
-/// use kube_genops::traits::ClusterResource;
+/// use koprs::traits::ClusterResource;
 /// use k8s_openapi::api::rbac::v1::ClusterRole;
 ///
 /// fn assert_cluster<T: ClusterResource>() {}
