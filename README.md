@@ -70,10 +70,34 @@ kind delete cluster --name kube-genops-test
 
 ### CI
 
+`cargo-ci.sh` runs all quality checks in sequence — format, type-check,
+unit tests, integration tests, coverage, release build, docs, and audit.
+
 ```bash
-./scripts/cargo-ci.sh           # run all checks
-./scripts/cargo-ci.sh --fast    # fmt + check + unit tests only
+./scripts/cargo-ci.sh                           # run all steps
+./scripts/cargo-ci.sh --fast                    # fmt + check + unit tests only (no coverage)
+./scripts/cargo-ci.sh --no-audit                # skip cargo-audit
+./scripts/cargo-ci.sh --no-integration          # skip integration tests
+./scripts/cargo-ci.sh --no-doc                  # skip cargo doc
+./scripts/cargo-ci.sh --no-coverage             # skip llvm-cov coverage report
+./scripts/cargo-ci.sh --bench                   # also compile benchmarks (slow, opt-in)
+./scripts/cargo-ci.sh --coverage-fail-under=80  # fail if line coverage drops below N%
 ```
+
+### Publishing
+
+`publish.sh` handles the full pre-flight and publishes all three crates to crates.io in
+dependency order — `koprs-derive`, `koprs`, `koprs-gen`.
+
+```bash
+./scripts/publish.sh                    # full pre-flight + publish all crates
+./scripts/publish.sh --dry-run          # stop before cargo publish
+./scripts/publish.sh --skip-ci          # skip CI checks, publish only
+./scripts/publish.sh --crate koprs      # publish a single crate
+```
+
+A 20 second delay is applied between each crate to allow crates.io to index before the
+next crate resolves it as a registry dependency.
 
 See the [CI script docs](./scripts/cargo-ci.sh) for the full list of flags.
 

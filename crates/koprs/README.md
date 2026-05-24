@@ -635,23 +635,6 @@ itself, so the suite is safe to run with `--test-threads` greater than one.
 
 ---
 
-### CI script
-`cargo-ci.sh` runs all quality checks in sequence — format, type-check,
-unit tests, integration tests, coverage, release build, docs, and audit.
-
-```bash
-./scripts/cargo-ci.sh                           # run all steps
-./scripts/cargo-ci.sh --fast                    # fmt + check + unit tests only (no coverage)
-./scripts/cargo-ci.sh --no-audit                # skip cargo-audit
-./scripts/cargo-ci.sh --no-integration          # skip integration tests
-./scripts/cargo-ci.sh --no-doc                  # skip cargo doc
-./scripts/cargo-ci.sh --no-coverage             # skip llvm-cov coverage report
-./scripts/cargo-ci.sh --bench                   # also compile benchmarks (slow, opt-in)
-./scripts/cargo-ci.sh --coverage-fail-under=80  # fail if line coverage drops below N%
-```
-
----
-
 ### Integration tests
 
 Integration tests run against a real cluster and are gated behind the
