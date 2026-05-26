@@ -24,7 +24,7 @@ tooling for CRDs and RBAC.
 ## Workspace layout
 
 ```
-operator-framework-rs/
+operator-sdk-rs/
 ├── Cargo.toml                  # workspace manifest
 ├── Cargo.lock
 └── crates/
@@ -66,9 +66,9 @@ cargo build -p koprs
 cargo test
 
 # integration tests
-kind create cluster --name operator-framework-rs-test
+kind create cluster --name operator-sdk-rs-test
 cargo test --features integration --test integration
-kind delete cluster --name operator-framework-rs-test
+kind delete cluster --name operator-sdk-rs-test
 ```
 
 ### CI
