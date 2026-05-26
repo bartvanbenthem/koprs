@@ -1,10 +1,10 @@
 [package]
 name = "koprs"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 description = "A reusable, ergonomic library that streamlines Kubernetes operator development, allowing developers to build controllers with significantly less code."
 license = "MIT"
-repository = "https://github.com/bartvanbenthem/kube-genops"
+repository = "https://github.com/bartvanbenthem/operator-sdk-rs"
 readme = "README.md"
 keywords = ["kubernetes", "operators", "controllers", "operator-sdk", "kube-rs"]
 categories = ["api-bindings"]

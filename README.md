@@ -1,11 +1,14 @@
-# Kubernetes Operator Framework
+# Kubernetes Operator SDK for Rust
 
-The monorepo behind `koprs`, a high-level Kubernetes operator framework for Rust.
+The project behind `koprs`, a high-level Kubernetes operator library for Rust.
 
-`koprs` is the idiomatic way to build Kubernetes operators in Rust. It is built on top of 
-[`kube`](https://github.com/kube-rs/kube) and `kube-runtime`, providing the opinionated 
-structure and reusable abstractions that production operators need, without forcing you to 
-reinvent them for every project.
+Operators make it easy to manage complex stateful applications on top of Kubernetes. However writing an Operator today can be difficult because of challenges such as using low level APIs, writing boilerplate, and a lack of modularity which leads to duplication.
+
+The Operator SDK for Rust is a framework that uses [`kube`](https://github.com/kube-rs/kube) and `kube-runtime` libraries to make writing operators easier by providing:
+
+* High level APIs and abstractions to write the operational logic more intuitively
+* Tools for scaffolding and code generation to bootstrap a new project fast
+* Extensions to cover common Operator use cases
 
 This repository contains the core framework, its proc macros, and the manifest generation 
 tooling for CRDs and RBAC.

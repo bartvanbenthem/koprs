@@ -3,10 +3,11 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/bartvanbenthem/operator-framework-rs"
+repository = "https://github.com/bartvanbenthem/operator-sdk-rs"
+description = "SDK for building Kubernetes applications in Rust. Provides high level APIs, useful abstractions, and project scaffolding."
 
 [workspace.dependencies]
 kube = { version = "0.95", features = ["runtime", "derive"] }
