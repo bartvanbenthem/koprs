@@ -37,7 +37,10 @@ operator-sdk-rs/
 
 If you are here to build a Kubernetes operator, you want [`koprs`](./crates/koprs). Start there.
 
-If you want to generate CRD or RBAC manifests from your annotated Rust types, you want [`koprs-gen`](./crates/koprs-gen).
+
+If you want to generate CRD or RBAC manifests from your annotated Rust types, you want [`koprs-gen`](./crates/koprs-gen). 
+> [!WARNING] 
+> `koprs-gen` is under development and not yet available.
 
 ## Contributing
 
