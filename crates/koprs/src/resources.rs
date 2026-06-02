@@ -73,6 +73,17 @@ where
     }
 }
 
+async fn get_resource_inner<T>(api: Api<T>, name: &str) -> Result<Option<T>>
+where
+    T: KubeResource,
+{
+    match api.get(name).await {
+        Ok(r) => Ok(Some(r)),
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Generic public API — apply
 // ---------------------------------------------------------------------------
@@ -288,6 +299,114 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Generic public API — get
+// ---------------------------------------------------------------------------
+
+/// Get a single Kubernetes resource by name, returning `None` if it does not exist.
+///
+/// Returns `Ok(None)` on a 404 response rather than an error, so callers can
+/// branch on existence without pattern-matching on [`KubeGenericError`].
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`get_namespaced_resource`] or [`get_cluster_resource`] for the common cases.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::get_resource;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// match get_resource::<MyCR, _>(client, Namespaced("my-namespace"), "my-cr").await? {
+///     Some(cr) => println!("found: {}", cr.meta().name.as_deref().unwrap_or("")),
+///     None => println!("not found"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn get_resource<T, Scope>(client: Client, scope: Scope, name: &str) -> Result<Option<T>>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    let kind = T::kind(&());
+    match scope.namespace() {
+        Some(namespace) => info!(%namespace, %kind, %name, "Getting resource"),
+        None => info!(%kind, %name, "Getting resource"),
+    }
+    get_resource_inner(scope.into_api(client), name).await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — get namespaced
+// ---------------------------------------------------------------------------
+
+/// Get a single **namespace-scoped** resource by name, returning `None` if it
+/// does not exist.
+///
+/// Delegates to [`get_resource`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::get_namespaced_resource;
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// if let Some(cr) = get_namespaced_resource::<MyCR>(client, "my-namespace", "my-cr").await? {
+///     println!("found: {}", cr.meta().name.as_deref().unwrap_or(""));
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn get_namespaced_resource<T>(
+    client: Client,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<T>>
+where
+    T: NamespacedResource,
+{
+    get_resource::<T, _>(client, Namespaced(namespace), name).await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — get cluster-scoped
+// ---------------------------------------------------------------------------
+
+/// Get a single **cluster-scoped** resource by name, returning `None` if it
+/// does not exist.
+///
+/// Delegates to [`get_resource`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::get_cluster_resource;
+/// use koprs::traits::ClusterResource;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// if let Some(cr) = get_cluster_resource::<MyCR>(client, "my-cr").await? {
+///     println!("found: {}", cr.meta().name.as_deref().unwrap_or(""));
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn get_cluster_resource<T>(client: Client, name: &str) -> Result<Option<T>>
+where
+    T: ClusterResource,
+{
+    get_resource::<T, _>(client, Cluster, name).await
+}
+
+// ---------------------------------------------------------------------------
 // Listing
 // ---------------------------------------------------------------------------
 
@@ -362,6 +481,34 @@ where
 {
     let api: Api<T> = Api::namespaced(client, namespace);
     Ok(api.list(&Default::default()).await?)
+}
+
+/// List all resources of type `T` in a specific namespace matching a label selector.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use koprs::resources::list_namespaced_resources_by_label;
+///
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
+/// let pods = list_namespaced_resources_by_label::<Pod>(client, "my-namespace", "app=my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn list_namespaced_resources_by_label<T>(
+    client: Client,
+    namespace: &str,
+    label_selector: &str,
+) -> Result<ObjectList<T>>
+where
+    T: NamespacedResource,
+{
+    let api: Api<T> = Api::namespaced(client, namespace);
+    let lp = ListParams::default().labels(label_selector);
+    Ok(api.list(&lp).await?)
 }
 
 /// List the names of all resources of type `T` matching a label selector,
