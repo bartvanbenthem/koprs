@@ -312,7 +312,7 @@ where
 /// Get a single Kubernetes resource by name, returning `None` if it does not exist.
 ///
 /// Returns `Ok(None)` on a 404 response rather than an error, so callers can
-/// branch on existence without pattern-matching on [`KubeGenericError`].
+/// branch on existence without pattern-matching on [`crate::error::KubeGenericError`].
 ///
 /// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
 /// [`get_namespaced_resource`] or [`get_cluster_resource`] for the common cases.

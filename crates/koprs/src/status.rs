@@ -220,7 +220,7 @@ where
 /// Build a [`Condition`] with `lastTransitionTime` set to now.
 ///
 /// Use [`upsert_condition`] to merge it into an existing conditions `Vec`
-/// before calling [`patch_conditions`].
+/// before calling [`patch_status`].
 ///
 /// # Examples
 ///
