@@ -3,9 +3,17 @@
 // Wires together the controller loop using koprs::controller::ControllerBuilder.
 // Cross-resource trigger: changes to any ConfigMap carrying our managed-by
 // label re-queue the owning ConfigMapSync CR.
+//
+// Operational features wired in:
+//   .health_port(8080)         — GET /healthz + GET /readyz for pod probes
+//   .graceful_shutdown()       — clean stop on SIGTERM / Ctrl+C
+//   .leader_election(...)      — Kubernetes Lease-based HA; only one replica reconciles
+//   .reconcile_timeout(300s)   — kills and requeues reconciles stuck longer than 5 minutes
 
 mod reconciler;
 mod types;
+
+use std::time::Duration;
 
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{Api, Client, ResourceExt};
@@ -38,6 +46,14 @@ async fn main() -> anyhow::Result<()> {
 
     let ctx = Context::new(client);
 
+    // The operator namespace is injected via the downward API in production:
+    //   env:
+    //     - name: OPERATOR_NAMESPACE
+    //       valueFrom:
+    //         fieldRef:
+    //           fieldPath: metadata.namespace
+    let operator_ns = std::env::var("OPERATOR_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+
     ControllerBuilder::new(cms_api)
         .with_watches(move |ctl| {
             ctl.watches(
@@ -61,6 +77,8 @@ async fn main() -> anyhow::Result<()> {
         })
         .health_port(8080)
         .graceful_shutdown()
+        .leader_election(operator_ns, "configmapsync-operator-leader")
+        .reconcile_timeout(Duration::from_secs(300))
         .run(ConfigMapSyncReconciler, ctx)
         .await?;
 

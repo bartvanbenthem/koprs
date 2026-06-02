@@ -176,7 +176,7 @@ where
 ///
 /// `GET /healthz` — `200 OK` always (liveness).
 /// `GET /readyz`  — `200 OK` once `ready` flips to `true`, else `503` (readiness).
-async fn serve_health(listener: tokio::net::TcpListener, ready: Arc<AtomicBool>) {
+pub(crate) async fn serve_health(listener: tokio::net::TcpListener, ready: Arc<AtomicBool>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     loop {
         let Ok((mut stream, _)) = listener.accept().await else {
@@ -233,13 +233,13 @@ async fn shutdown_signal() {
 // Internal: leader election
 // ---------------------------------------------------------------------------
 
-struct LeaderElectionConfig {
-    namespace: String,
-    name: String,
-    identity: String,
-    lease_duration_secs: i32,
-    renew_period: Duration,
-    retry_period: Duration,
+pub(crate) struct LeaderElectionConfig {
+    pub(crate) namespace: String,
+    pub(crate) name: String,
+    pub(crate) identity: String,
+    pub(crate) lease_duration_secs: i32,
+    pub(crate) renew_period: Duration,
+    pub(crate) retry_period: Duration,
 }
 
 /// Attempt to acquire or renew the Lease.
@@ -247,7 +247,10 @@ struct LeaderElectionConfig {
 /// Returns `true` if this identity now holds the lease.
 /// Returns `false` if another identity holds a non-expired lease.
 /// Optimistic locking: passes `resourceVersion` to detect concurrent writers.
-async fn try_acquire_or_renew(config: &LeaderElectionConfig, client: &Client) -> Result<bool> {
+pub(crate) async fn try_acquire_or_renew(
+    config: &LeaderElectionConfig,
+    client: &Client,
+) -> Result<bool> {
     let api: kube::Api<Lease> = kube::Api::namespaced(client.clone(), &config.namespace);
     let now = chrono::Utc::now();
     let now_micro = MicroTime(now);
@@ -270,7 +273,6 @@ async fn try_acquire_or_renew(config: &LeaderElectionConfig, client: &Client) ->
                 config.lease_duration_secs,
                 now_micro.clone(),
                 now_micro,
-                None,
                 None,
                 Some(0),
             );
@@ -316,7 +318,6 @@ async fn try_acquire_or_renew(config: &LeaderElectionConfig, client: &Client) ->
                 now_micro,
                 existing.metadata.resource_version.clone(),
                 transitions,
-                None,
             );
 
             match api
@@ -331,7 +332,7 @@ async fn try_acquire_or_renew(config: &LeaderElectionConfig, client: &Client) ->
     }
 }
 
-fn build_lease(
+pub(crate) fn build_lease(
     name: &str,
     namespace: &str,
     identity: &str,
@@ -340,7 +341,6 @@ fn build_lease(
     renew_time: MicroTime,
     resource_version: Option<String>,
     lease_transitions: Option<i32>,
-    _lease_transitions_new: Option<i32>,
 ) -> Lease {
     Lease {
         metadata: ObjectMeta {
@@ -490,7 +490,7 @@ where
     pub(crate) health_port: Option<u16>,
     pub(crate) graceful_shutdown: bool,
     pub(crate) reconcile_timeout: Option<Duration>,
-    leader_election: Option<LeaderElectionConfig>,
+    pub(crate) leader_election: Option<LeaderElectionConfig>,
     _phantom: PhantomData<T>,
 }
 
