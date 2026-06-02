@@ -11,10 +11,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use chrono::SecondsFormat;
-
 use k8s_openapi::api::core::v1::ConfigMap;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta};
 use kube::runtime::controller::Action;
 use kube::{Client, ResourceExt};
 use tokio::time::Duration;
@@ -26,7 +24,7 @@ use koprs::gc::gc_namespaced_resources;
 use koprs::resources::{
     apply_namespaced_resource, delete_namespaced_resource, patch_labels_namespaced,
 };
-use koprs::status::patch_status_namespaced;
+use koprs::status::{make_condition, patch_status_namespaced, upsert_condition};
 
 use crate::types::{ConfigMapSync, ConfigMapSyncStatus, SyncCondition};
 
@@ -130,34 +128,33 @@ pub async fn reconcile(
     //    all status fields. Two separate patches by the same manager would cause
     //    each one to drop the other's fields on every reconcile, triggering an
     //    endless watch-event loop.
-    //    Preserve lastTransitionTime when Ready is already True so this patch
-    //    is idempotent and does not bump resourceVersion on unchanged reconciles.
     let generation = cr.metadata.generation;
-    let last_transition_time = cr
+    let status_message = format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'");
+
+    let mut conditions: Vec<Condition> = cr
         .status
         .as_ref()
-        .and_then(|s| {
-            s.conditions
-                .iter()
-                .find(|c| c.type_ == "Ready" && c.status == "True")
-        })
-        .map(|c| c.last_transition_time.clone())
-        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
+        .map(|s| s.conditions.iter().map(sync_to_k8s_condition).collect())
+        .unwrap_or_default();
+    upsert_condition(
+        &mut conditions,
+        make_condition(
+            "Ready",
+            "True",
+            "ConfigMapSynced",
+            &status_message,
+            generation,
+        ),
+    );
+
     patch_status_namespaced::<ConfigMapSync, ConfigMapSyncStatus>(
         client.clone(),
         &namespace,
         &name,
         ConfigMapSyncStatus {
             ready: true,
-            message: format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'"),
-            conditions: vec![SyncCondition {
-                type_: "Ready".to_string(),
-                status: "True".to_string(),
-                reason: "ConfigMapSynced".to_string(),
-                message: format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'"),
-                last_transition_time,
-                observed_generation: generation,
-            }],
+            message: status_message,
+            conditions: conditions.into_iter().map(k8s_to_sync_condition).collect(),
         },
         FIELD_MANAGER,
     )
@@ -182,6 +179,38 @@ pub fn error_policy(cr: Arc<ConfigMapSync>, error: &ReconcileError, _ctx: Arc<Co
 
 fn configmap_name(cr_name: &str) -> String {
     format!("cms-{cr_name}")
+}
+
+fn sync_to_k8s_condition(sc: &SyncCondition) -> Condition {
+    use chrono::DateTime;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
+    Condition {
+        type_: sc.type_.clone(),
+        status: sc.status.clone(),
+        reason: sc.reason.clone(),
+        message: sc.message.clone(),
+        observed_generation: sc.observed_generation,
+        last_transition_time: Time(
+            DateTime::parse_from_rfc3339(&sc.last_transition_time)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now()),
+        ),
+    }
+}
+
+fn k8s_to_sync_condition(c: Condition) -> SyncCondition {
+    use chrono::SecondsFormat;
+    SyncCondition {
+        type_: c.type_,
+        status: c.status,
+        reason: c.reason,
+        message: c.message,
+        last_transition_time: c
+            .last_transition_time
+            .0
+            .to_rfc3339_opts(SecondsFormat::Secs, true),
+        observed_generation: c.observed_generation,
+    }
 }
 
 fn build_configmap(
