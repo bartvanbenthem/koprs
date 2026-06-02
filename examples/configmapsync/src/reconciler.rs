@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta};
-use kube::runtime::controller::Action;
-use kube::{Client, ResourceExt};
+use kube::ResourceExt;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
+use koprs::controller::{Action, Context, Reconciler};
 use koprs::error::KubeGenericError;
 use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers_namespaced};
 use koprs::gc::gc_namespaced_resources;
@@ -33,14 +33,6 @@ const FIELD_MANAGER: &str = "configmapsync-operator";
 const MANAGED_LABEL: &str = "app.kubernetes.io/managed-by=configmapsync-operator";
 
 // ---------------------------------------------------------------------------
-// Context
-// ---------------------------------------------------------------------------
-
-pub struct Context {
-    pub client: Client,
-}
-
-// ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
 
@@ -54,123 +46,138 @@ pub enum ReconcileError {
 }
 
 // ---------------------------------------------------------------------------
-// Reconcile
+// Reconciler
 // ---------------------------------------------------------------------------
 
-pub async fn reconcile(
-    cr: Arc<ConfigMapSync>,
-    ctx: Arc<Context>,
-) -> Result<Action, ReconcileError> {
-    let client = ctx.client.clone();
-    let name = cr.name_any();
-    let namespace = cr
-        .namespace()
-        .ok_or(ReconcileError::MissingField("namespace"))?;
+pub struct ConfigMapSyncReconciler;
 
-    info!(cr = %name, ns = %namespace, "reconciling ConfigMapSync");
+impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
+    type Error = ReconcileError;
 
-    // -----------------------------------------------------------------------
-    // Deletion path
-    // -----------------------------------------------------------------------
-    if cr.metadata.deletion_timestamp.is_some() {
-        info!(cr = %name, "deletion timestamp set — running cleanup");
+    async fn reconcile(
+        &self,
+        cr: Arc<ConfigMapSync>,
+        ctx: Arc<Context>,
+    ) -> Result<Action, ReconcileError> {
+        let client = ctx.client.clone();
+        let name = cr.name_any();
+        let namespace = cr
+            .namespace()
+            .ok_or(ReconcileError::MissingField("namespace"))?;
 
-        let target_ns = &cr.spec.target_namespace;
-        let cm_name = configmap_name(&name);
+        info!(cr = %name, ns = %namespace, "reconciling ConfigMapSync");
 
-        match delete_namespaced_resource::<ConfigMap>(client.clone(), target_ns, &cm_name).await {
-            Ok(true) => info!(cm = %cm_name, ns = %target_ns, "deleted synced ConfigMap"),
-            Ok(false) => info!(cm = %cm_name, "ConfigMap was already gone"),
-            Err(e) => {
-                error!(error = %e, "failed to delete ConfigMap during cleanup");
-                return Err(e.into());
+        // -------------------------------------------------------------------
+        // Deletion path
+        // -------------------------------------------------------------------
+        if cr.metadata.deletion_timestamp.is_some() {
+            info!(cr = %name, "deletion timestamp set — running cleanup");
+
+            let target_ns = &cr.spec.target_namespace;
+            let cm_name = configmap_name(&name);
+
+            match delete_namespaced_resource::<ConfigMap>(client.clone(), target_ns, &cm_name).await
+            {
+                Ok(true) => info!(cm = %cm_name, ns = %target_ns, "deleted synced ConfigMap"),
+                Ok(false) => info!(cm = %cm_name, "ConfigMap was already gone"),
+                Err(e) => {
+                    error!(error = %e, "failed to delete ConfigMap during cleanup");
+                    return Err(e.into());
+                }
             }
+
+            remove_finalizers_namespaced::<ConfigMapSync>(client.clone(), &namespace, &name)
+                .await?;
+            info!(cr = %name, "finalizer removed — deletion complete");
+            return Ok(Action::await_change());
         }
 
-        remove_finalizers_namespaced::<ConfigMapSync>(client.clone(), &namespace, &name).await?;
-        info!(cr = %name, "finalizer removed — deletion complete");
-        return Ok(Action::await_change());
+        // -------------------------------------------------------------------
+        // Normal reconcile path
+        // -------------------------------------------------------------------
+
+        // 1. Ensure finalizer is present.
+        add_finalizer_namespaced::<ConfigMapSync>(client.clone(), &cr, FINALIZER).await?;
+
+        // 2. Build and apply the desired ConfigMap via koprs SSA.
+        let target_ns = &cr.spec.target_namespace;
+        let cm_name = configmap_name(&name);
+        let desired_cm = build_configmap(&cm_name, target_ns, &name, &cr.spec.data);
+
+        apply_namespaced_resource::<ConfigMap>(
+            client.clone(),
+            target_ns,
+            &desired_cm,
+            FIELD_MANAGER,
+        )
+        .await?;
+        info!(cm = %cm_name, ns = %target_ns, "applied ConfigMap");
+
+        // 3. Garbage-collect stale ConfigMaps previously owned by this CR.
+        gc_namespaced_resources::<ConfigMap>(client.clone(), target_ns, MANAGED_LABEL, |cm| {
+            cm.name_any() == cm_name
+        })
+        .await?;
+
+        // 4. Stamp the target namespace as a label on the CR so it is visible
+        //    without fetching the full spec.
+        patch_labels_namespaced::<ConfigMapSync>(
+            client.clone(),
+            &namespace,
+            &name,
+            &[("configmapsync.example.io/synced-to", target_ns)],
+        )
+        .await?;
+
+        // 5. Write the full status in one SSA patch so a single field manager owns
+        //    all status fields. Two separate patches by the same manager would cause
+        //    each one to drop the other's fields on every reconcile, triggering an
+        //    endless watch-event loop.
+        let generation = cr.metadata.generation;
+        let status_message = format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'");
+
+        let mut conditions: Vec<Condition> = cr
+            .status
+            .as_ref()
+            .map(|s| s.conditions.iter().map(sync_to_k8s_condition).collect())
+            .unwrap_or_default();
+        upsert_condition(
+            &mut conditions,
+            make_condition(
+                "Ready",
+                "True",
+                "ConfigMapSynced",
+                &status_message,
+                generation,
+            ),
+        );
+
+        patch_status_namespaced::<ConfigMapSync, ConfigMapSyncStatus>(
+            client.clone(),
+            &namespace,
+            &name,
+            ConfigMapSyncStatus {
+                ready: true,
+                message: status_message,
+                conditions: conditions.into_iter().map(k8s_to_sync_condition).collect(),
+            },
+            FIELD_MANAGER,
+        )
+        .await?;
+
+        info!(cr = %name, "reconcile complete");
+        Ok(Action::requeue(Duration::from_secs(300)))
     }
 
-    // -----------------------------------------------------------------------
-    // Normal reconcile path
-    // -----------------------------------------------------------------------
-
-    // 1. Ensure finalizer is present.
-    add_finalizer_namespaced::<ConfigMapSync>(client.clone(), &cr, FINALIZER).await?;
-
-    // 2. Build and apply the desired ConfigMap via koprs SSA.
-    let target_ns = &cr.spec.target_namespace;
-    let cm_name = configmap_name(&name);
-    let desired_cm = build_configmap(&cm_name, target_ns, &name, &cr.spec.data);
-
-    apply_namespaced_resource::<ConfigMap>(client.clone(), target_ns, &desired_cm, FIELD_MANAGER)
-        .await?;
-    info!(cm = %cm_name, ns = %target_ns, "applied ConfigMap");
-
-    // 3. Garbage-collect stale ConfigMaps previously owned by this CR.
-    gc_namespaced_resources::<ConfigMap>(client.clone(), target_ns, MANAGED_LABEL, |cm| {
-        cm.name_any() == cm_name
-    })
-    .await?;
-
-    // 4. Stamp the target namespace as a label on the CR so it is visible
-    //    without fetching the full spec.
-    patch_labels_namespaced::<ConfigMapSync>(
-        client.clone(),
-        &namespace,
-        &name,
-        &[("configmapsync.example.io/synced-to", target_ns)],
-    )
-    .await?;
-
-    // 5. Write the full status in one SSA patch so a single field manager owns
-    //    all status fields. Two separate patches by the same manager would cause
-    //    each one to drop the other's fields on every reconcile, triggering an
-    //    endless watch-event loop.
-    let generation = cr.metadata.generation;
-    let status_message = format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'");
-
-    let mut conditions: Vec<Condition> = cr
-        .status
-        .as_ref()
-        .map(|s| s.conditions.iter().map(sync_to_k8s_condition).collect())
-        .unwrap_or_default();
-    upsert_condition(
-        &mut conditions,
-        make_condition(
-            "Ready",
-            "True",
-            "ConfigMapSynced",
-            &status_message,
-            generation,
-        ),
-    );
-
-    patch_status_namespaced::<ConfigMapSync, ConfigMapSyncStatus>(
-        client.clone(),
-        &namespace,
-        &name,
-        ConfigMapSyncStatus {
-            ready: true,
-            message: status_message,
-            conditions: conditions.into_iter().map(k8s_to_sync_condition).collect(),
-        },
-        FIELD_MANAGER,
-    )
-    .await?;
-
-    info!(cr = %name, "reconcile complete");
-    Ok(Action::requeue(Duration::from_secs(300)))
-}
-
-// ---------------------------------------------------------------------------
-// Error handler
-// ---------------------------------------------------------------------------
-
-pub fn error_policy(cr: Arc<ConfigMapSync>, error: &ReconcileError, _ctx: Arc<Context>) -> Action {
-    warn!(cr = %cr.name_any(), error = %error, "reconcile failed — retrying in 30s");
-    Action::requeue(Duration::from_secs(30))
+    fn error_policy(
+        &self,
+        cr: Arc<ConfigMapSync>,
+        error: &ReconcileError,
+        _ctx: Arc<Context>,
+    ) -> Action {
+        warn!(cr = %cr.name_any(), error = %error, "reconcile failed — retrying in 30s");
+        Action::requeue(Duration::from_secs(30))
+    }
 }
 
 // ---------------------------------------------------------------------------

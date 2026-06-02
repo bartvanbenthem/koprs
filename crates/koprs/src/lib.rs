@@ -29,6 +29,7 @@
 //! }
 //! ```
 
+pub mod controller;
 pub mod error;
 pub mod finalizers;
 pub mod gc;

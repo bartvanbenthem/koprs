@@ -20,7 +20,7 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
                            |
                            v  [Turbofish Types Passed Down]
 +-------------------------------------------------------+
-|                    koprs                        |
+|                    koprs                              |
 |  (Generic SSA, Lifecycle Helpers, Status Patching)    |
 +-------------------------------------------------------+
                            |

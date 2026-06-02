@@ -180,11 +180,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "futures-util",
  "k8s-openapi",
  "koprs",
  "kube",
- "kube-runtime",
  "schemars",
  "serde",
  "serde_json",
