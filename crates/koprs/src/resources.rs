@@ -838,7 +838,7 @@ pub fn make_object_ref_mapper<T, CR>(
 ) -> impl Fn(T) -> Vec<kube_runtime::reflector::ObjectRef<CR>>
 where
     CR: Clone + Resource<DynamicType = ()> + 'static,
-    T: kube::core::object::HasSpec + 'static,
+    T: 'static,
 {
     move |_: T| (*refs).clone()
 }
