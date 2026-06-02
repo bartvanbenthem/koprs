@@ -79,8 +79,7 @@ second apply creates the `app-config` CR.
 #### Local (out-of-cluster)
 
 ```bash
-cargo build --release
-RUST_LOG=info ./target/release/operator
+RUST_LOG=info cargo run --release
 ```
 
 The operator uses the kubeconfig from `~/.kube/config` (or the `KUBECONFIG` env var) when running out-of-cluster.
@@ -116,7 +115,7 @@ Cargo.toml
 |---|---|---|
 | `kube` | 1.1.0 | Kubernetes client + controller runtime |
 | `k8s-openapi` | 0.25.0 (v1_33) | Typed Kubernetes API objects |
-| `koprs` | 0.5.7 | Helper abstractions (SSA, finalizers, status patching, GC) |
+| `koprs` | 0.6.1 | Helper abstractions (SSA, finalizers, status patching, GC) |
 | `tokio` | 1.0 | Async runtime |
 | `tracing` / `tracing-subscriber` | 0.1 / 0.3 | Structured logging |
 
