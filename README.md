@@ -1,10 +1,10 @@
 # Kubernetes Operator SDK for Rust
 
-The project behind `koprs`, a high-level Kubernetes operator library for Rust.
+The project behind [`koprs`](./crates/koprs), a high-level Kubernetes operator library for Rust.
 
 Operators make it easy to manage complex stateful applications on top of Kubernetes. However writing an Operator today can be difficult because of challenges such as using low level APIs, writing boilerplate, and a lack of modularity which leads to duplication.
 
-The Operator SDK for Rust is a framework that uses [`kube`](https://github.com/kube-rs/kube) and `kube-runtime` libraries to make writing operators easier by providing:
+The Operator SDK for Rust is a framework that uses [`kube`](https://github.com/kube-rs/kube) and [`kube-runtime`](https://crates.io/crates/kube-runtime) libraries to make writing operators easier by providing:
 
 * High level APIs and abstractions to write the operational logic more intuitively
 * Tools for scaffolding and code generation to bootstrap a new project fast
@@ -24,7 +24,7 @@ tooling for CRDs and RBAC.
 ## Workspace layout
 
 ```
-operator-framework-rs/
+operator-sdk-rs/
 ├── Cargo.toml                  # workspace manifest
 ├── Cargo.lock
 └── crates/
@@ -37,7 +37,10 @@ operator-framework-rs/
 
 If you are here to build a Kubernetes operator, you want [`koprs`](./crates/koprs). Start there.
 
-If you want to generate CRD or RBAC manifests from your annotated Rust types, you want [`koprs-gen`](./crates/koprs-gen).
+
+If you want to generate CRD or RBAC manifests from your annotated Rust types, you want [`koprs-gen`](./crates/koprs-gen). 
+> [!WARNING] 
+> `koprs-gen` is under development and not yet available.
 
 ## Contributing
 
@@ -66,9 +69,9 @@ cargo build -p koprs
 cargo test
 
 # integration tests
-kind create cluster --name operator-framework-rs-test
+kind create cluster --name operator-sdk-rs-test
 cargo test --features integration --test integration
-kind delete cluster --name operator-framework-rs-test
+kind delete cluster --name operator-sdk-rs-test
 ```
 
 ### CI

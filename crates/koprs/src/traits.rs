@@ -1,6 +1,5 @@
-use k8s_openapi::{ClusterResourceScope, Metadata, NamespaceResourceScope};
+use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope};
 use kube::Resource;
-use kube::core::ObjectMeta;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
@@ -43,15 +42,7 @@ use std::fmt::Debug;
 /// assert_kube_resource::<Pod>();
 /// ```
 pub trait KubeResource:
-    Clone
-    + Debug
-    + Resource<DynamicType = ()>
-    + Metadata<Ty = ObjectMeta>
-    + DeserializeOwned
-    + Serialize
-    + Send
-    + Sync
-    + 'static
+    Clone + Debug + Resource<DynamicType = ()> + DeserializeOwned + Serialize + Send + Sync + 'static
 {
 }
 
@@ -59,7 +50,6 @@ impl<T> KubeResource for T where
     T: Clone
         + Debug
         + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
         + DeserializeOwned
         + Serialize
         + Send

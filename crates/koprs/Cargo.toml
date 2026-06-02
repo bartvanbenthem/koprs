@@ -1,6 +1,6 @@
 [package]
 name = "koprs"
-version = "0.5.4"
+version = "0.6.1"
 edition = "2024"
 description = "A reusable, ergonomic library that streamlines Kubernetes operator development, allowing developers to build controllers with significantly less code."
 license = "MIT"
@@ -33,14 +33,3 @@ http       = "1"
 
 [features]
 integration = []
-
-[licenses]
-allow = [
-  "MIT",
-  "Apache-2.0",
-  "Apache-2.0 WITH LLVM-exception",
-  "BSD-2-Clause",
-  "BSD-3-Clause",
-  "ISC",
-  "Unicode-3.0",
-]

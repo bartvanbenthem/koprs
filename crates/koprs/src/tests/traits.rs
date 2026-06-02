@@ -189,30 +189,37 @@ mod traits_tests {
     mod synthetic {
         use kube::core::ObjectMeta;
         use serde::{Deserialize, Serialize};
+        use std::borrow::Cow;
 
         // A minimal CRD-like type that satisfies all KubeResource bounds.
-        // kube::CustomResource derive is not available here, so we implement
-        // the required traits manually.
+        // Mirrors what kube::CustomResource derive generates: a direct kube::Resource
+        // impl without going through k8s_openapi::Metadata. This is the pattern that
+        // previously failed to satisfy KubeResource.
         #[derive(Clone, Debug, Serialize, Deserialize)]
         pub struct FakeCrd {
             pub metadata: ObjectMeta,
         }
 
-        impl k8s_openapi::Resource for FakeCrd {
-            const API_VERSION: &'static str = "example.com/v1";
-            const GROUP: &'static str = "example.com";
-            const KIND: &'static str = "FakeCrd";
-            const VERSION: &'static str = "v1";
-            const URL_PATH_SEGMENT: &'static str = "fakecrds";
+        impl kube::Resource for FakeCrd {
+            type DynamicType = ();
             type Scope = k8s_openapi::NamespaceResourceScope;
-        }
 
-        impl k8s_openapi::Metadata for FakeCrd {
-            type Ty = ObjectMeta;
-            fn metadata(&self) -> &ObjectMeta {
+            fn group(_: &()) -> Cow<'_, str> {
+                Cow::Borrowed("example.com")
+            }
+            fn version(_: &()) -> Cow<'_, str> {
+                Cow::Borrowed("v1")
+            }
+            fn kind(_: &()) -> Cow<'_, str> {
+                Cow::Borrowed("FakeCrd")
+            }
+            fn plural(_: &()) -> Cow<'_, str> {
+                Cow::Borrowed("fakecrds")
+            }
+            fn meta(&self) -> &ObjectMeta {
                 &self.metadata
             }
-            fn metadata_mut(&mut self) -> &mut ObjectMeta {
+            fn meta_mut(&mut self) -> &mut ObjectMeta {
                 &mut self.metadata
             }
         }

@@ -32,14 +32,14 @@ where
 
     for resource in existing {
         let name = resource.name_any();
-        let ns = resource.metadata().namespace.clone().unwrap_or_default();
+        let ns = resource.namespace().unwrap_or_default();
         let api = make_api(&ns);
 
         if is_desired(&resource) {
             continue;
         }
 
-        if resource.metadata().deletion_timestamp.is_some() {
+        if resource.meta().deletion_timestamp.is_some() {
             info!(%name, %ns, "Resource is terminating — clearing finalizers");
             clear_finalizers(&api, &name).await;
             continue;
