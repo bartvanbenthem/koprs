@@ -17,12 +17,15 @@ use kube::ResourceExt;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
+use kube::runtime::events::{Event, EventType, Recorder, Reporter};
+use kube::Resource;
+
 use koprs::controller::{Action, Context, Reconciler};
 use koprs::error::KubeGenericError;
 use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers_namespaced};
 use koprs::gc::gc_namespaced_resources;
 use koprs::resources::{
-    apply_namespaced_resource, delete_namespaced_resource, patch_labels_namespaced,
+    delete_namespaced_resource, ensure_namespaced_resource, patch_labels_namespaced, EnsureOutcome,
 };
 use koprs::status::{make_condition, patch_status_namespaced, upsert_condition};
 
@@ -99,12 +102,16 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
         // 1. Ensure finalizer is present.
         add_finalizer_namespaced::<ConfigMapSync>(client.clone(), &cr, FINALIZER).await?;
 
-        // 2. Build and apply the desired ConfigMap via koprs SSA.
+        // 2. Build and ensure the desired ConfigMap via koprs SSA.
+        //    ensure_namespaced_resource returns an EnsureOutcome so we can emit a
+        //    Kubernetes Event only when the ConfigMap was actually written.  Plain
+        //    SSA is already idempotent, but Kubernetes Events are append-only — we
+        //    must not publish one on every no-op reconcile.
         let target_ns = &cr.spec.target_namespace;
         let cm_name = configmap_name(&name);
         let desired_cm = build_configmap(&cm_name, target_ns, &name, &cr.spec.data);
 
-        apply_namespaced_resource::<ConfigMap>(
+        let outcome = ensure_namespaced_resource::<ConfigMap>(
             client.clone(),
             target_ns,
             &desired_cm,
@@ -112,6 +119,38 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
         )
         .await?;
         info!(cm = %cm_name, ns = %target_ns, "applied ConfigMap");
+
+        if outcome.was_changed() {
+            let (reason, note) = match &outcome {
+                EnsureOutcome::Created(_) => (
+                    "ConfigMapCreated",
+                    format!("ConfigMap '{cm_name}' created in namespace '{target_ns}'"),
+                ),
+                EnsureOutcome::Updated(_) => (
+                    "ConfigMapDriftCorrected",
+                    format!("ConfigMap '{cm_name}' corrected in namespace '{target_ns}'"),
+                ),
+                EnsureOutcome::Unchanged(_) => unreachable!(),
+            };
+            let recorder = Recorder::new(
+                client.clone(),
+                Reporter { controller: FIELD_MANAGER.into(), instance: None },
+            );
+            recorder
+                .publish(
+                    &Event {
+                        type_: EventType::Normal,
+                        reason: reason.into(),
+                        note: Some(note),
+                        action: "Sync".into(),
+                        secondary: None,
+                    },
+                    &cr.object_ref(&()),
+                )
+                .await
+                .map_err(kube::Error::from)
+                .map_err(KubeGenericError::from)?;
+        }
 
         // 3. Garbage-collect stale ConfigMaps previously owned by this CR.
         gc_namespaced_resources::<ConfigMap>(client.clone(), target_ns, MANAGED_LABEL, |cm| {
