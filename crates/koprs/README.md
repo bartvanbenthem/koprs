@@ -36,12 +36,13 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 ## Features
 
 - **Apply & delete** — cluster-scoped and namespaced resources via Server-Side Apply (SSA)
+- **Get** — fetch a single resource by name, returning `Option<T>` (`None` on 404)
 - **Status patching** — patch the `/status` subresource of any CRD, cluster-scoped or namespaced
 - **Finalizers** — add and remove finalizers on cluster-scoped and namespaced resources
 - **Garbage collection** — diff-based GC for orphaned cluster and namespaced resources, with stuck-termination recovery
 - **Watchers** — watch any resource type with optional label filtering, signal-based via `mpsc`
 - **Listing** — list resources across namespaces or within a namespace, with or without label selectors
-- **ObjectRefs** — build `ObjectRef` sets for cross-resource reconcile triggers
+- **Ownership & controller wiring** — build `OwnerReference`s, set owner refs on children, generate `ObjectRef` sets, and create mapper closures for cross-resource reconcile triggers
 - **Persist to disk** — fetch a resource list and write it as JSON to a file
 - **Typed errors** — `KubeGenericError` enum via `thiserror`, pattern-matchable by callers
 
@@ -62,11 +63,12 @@ koprs = { path = "../koprs" }
 
 | Module | Description |
 |---|---|
-| `resources` | Apply, delete, list, poll, and fetch resources (cluster + namespaced) |
+| `resources` | Apply, delete, get, list, poll, and fetch resources (cluster + namespaced) |
 | `status` | Patch `/status` subresource via SSA |
 | `finalizers` | Add and remove finalizers |
 | `gc` | Garbage collect orphaned resources |
 | `watcher` | Watch resources for changes via `mpsc` signals |
+| `owners` | Owner references, child wiring, `ObjectRef` sets, and mapper closures |
 | `scope` | `Cluster` and `Namespaced` scope markers for compile-time API selection |
 | `traits` | `KubeResource`, `NamespacedResource`, `ClusterResource` trait aliases |
 | `error` | `KubeGenericError` enum |
@@ -472,10 +474,25 @@ match resources.len() {
 }
 ```
 
-### ObjectRefs
+### Ownership
 
 ```rust
-use koprs::resources::{
+use koprs::owners::{controller_ref, owner_ref, set_owner_refs};
+
+// Non-controller owner reference
+let oref = owner_ref(&parent_cr)?;
+
+// Controller owner reference (controller: true, block_owner_deletion: true)
+let oref = controller_ref(&parent_cr)?;
+
+// Attach to a child resource
+set_owner_refs(&mut child_deployment, vec![oref]);
+```
+
+### ObjectRefs and controller wiring
+
+```rust
+use koprs::owners::{
     make_object_refs, make_object_refs_cluster, make_object_refs_namespaced,
     make_object_ref_mapper,
 };
@@ -492,7 +509,8 @@ let refs = make_object_refs_cluster::(client.clone()).await?;
 let refs = make_object_refs::(client.clone(), Namespaced("my-namespace")).await?;
 let refs = make_object_refs::(client.clone(), Cluster).await?;
 
-// Build a mapper for cross-resource reconcile triggers
+// Build a mapper for cross-resource reconcile triggers.
+// The triggering type T is unconstrained — any resource type may be a trigger.
 let mapper = make_object_ref_mapper::(Arc::new(refs));
 ```
 
@@ -553,11 +571,11 @@ Tests are organised one file per module under `src/tests/`:
 ```
 src/tests/
 ├── mod.rs
-├── common.rs        # shared mock harness and fixture builders
 ├── resources.rs
 ├── status.rs
 ├── finalizers.rs
 ├── gc.rs
+├── owners.rs
 ├── watcher.rs
 ├── scope.rs
 ├── traits.rs

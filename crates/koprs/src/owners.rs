@@ -1,10 +1,31 @@
+//! Resource relationship helpers.
+//!
+//! Covers two kinds of relationships between Kubernetes resources:
+//!
+//! - **Ownership** — [`owner_ref`], [`controller_ref`], and [`set_owner_refs`]
+//!   build and attach `metadata.ownerReferences` so Kubernetes can garbage
+//!   collect child resources when their owner is deleted.
+//!
+//! - **Controller wiring** — [`make_object_refs`], [`make_object_refs_namespaced`],
+//!   [`make_object_refs_cluster`], and [`make_object_ref_mapper`] build
+//!   [`ObjectRef`] sets and mapper closures for cross-resource reconcile
+//!   triggers in `kube-runtime` controllers.
+//!
+//! See: <https://kube.rs/controllers/relations/#watched-relations>
+
+use std::sync::Arc;
+
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use kube::{Api, Client, Resource};
+use kube_runtime::reflector::ObjectRef;
+use tracing::info;
 
 use crate::error::{KubeGenericError, Result};
-use crate::traits::KubeResource;
+use crate::scope::{ApiScope, Cluster, Namespaced};
+use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
 // ---------------------------------------------------------------------------
-// Private core helper
+// Private core helpers
 // ---------------------------------------------------------------------------
 
 fn build_owner_ref<T: KubeResource>(owner: &T, controller: bool) -> Result<OwnerReference> {
@@ -28,8 +49,26 @@ fn build_owner_ref<T: KubeResource>(owner: &T, controller: bool) -> Result<Owner
     })
 }
 
+async fn build_object_refs<T>(api: Api<T>) -> Result<Vec<ObjectRef<T>>>
+where
+    T: KubeResource,
+{
+    let resources = api.list(&Default::default()).await?;
+    let mut refs = Vec::new();
+    for resource in resources.items {
+        let meta = resource.meta();
+        let name = meta
+            .name
+            .clone()
+            .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))?;
+        info!(%name, "Building ObjectRef");
+        refs.push(ObjectRef::new(&name));
+    }
+    Ok(refs)
+}
+
 // ---------------------------------------------------------------------------
-// Public API
+// Ownership — public API
 // ---------------------------------------------------------------------------
 
 /// Build a non-controller `OwnerReference` pointing at `owner`.
@@ -103,4 +142,139 @@ pub fn controller_ref<T: KubeResource>(owner: &T) -> Result<OwnerReference> {
 /// ```
 pub fn set_owner_refs<T: KubeResource>(child: &mut T, refs: Vec<OwnerReference>) {
     child.meta_mut().owner_references = Some(refs);
+}
+
+// ---------------------------------------------------------------------------
+// Controller wiring — generic public API
+// ---------------------------------------------------------------------------
+
+/// Generate [`ObjectRef`]s for all live instances of a resource type.
+///
+/// Queries the Kubernetes API and returns one `ObjectRef` per resource found.
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
+/// correct API surface at compile time. Prefer [`make_object_refs_namespaced`]
+/// or [`make_object_refs_cluster`] for the common cases.
+///
+/// Useful for setting up watched relations in `kube-runtime` controllers.
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::owners::make_object_refs;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// let refs = make_object_refs::<MyCR, _>(client, Namespaced("my-namespace")).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn make_object_refs<T, Scope>(client: Client, scope: Scope) -> Result<Vec<ObjectRef<T>>>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    build_object_refs(scope.into_api(client)).await
+}
+
+// ---------------------------------------------------------------------------
+// Controller wiring — convenience wrappers
+// ---------------------------------------------------------------------------
+
+/// Generate [`ObjectRef`]s for all live instances of a **namespace-scoped**
+/// resource type.
+///
+/// Delegates to [`make_object_refs`] with [`Namespaced`] as the scope.
+///
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::owners::make_object_refs_namespaced;
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// let refs = make_object_refs_namespaced::<MyCR>(client, "my-namespace").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn make_object_refs_namespaced<T>(
+    client: Client,
+    namespace: &str,
+) -> Result<Vec<ObjectRef<T>>>
+where
+    T: NamespacedResource,
+{
+    make_object_refs::<T, _>(client, Namespaced(namespace)).await
+}
+
+/// Generate [`ObjectRef`]s for all live instances of a **cluster-scoped**
+/// resource type.
+///
+/// Delegates to [`make_object_refs`] with [`Cluster`] as the scope.
+///
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::owners::make_object_refs_cluster;
+/// use koprs::traits::ClusterResource;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// let refs = make_object_refs_cluster::<MyCR>(client).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn make_object_refs_cluster<T>(client: Client) -> Result<Vec<ObjectRef<T>>>
+where
+    T: ClusterResource,
+{
+    make_object_refs::<T, _>(client, Cluster).await
+}
+
+/// Build a mapper closure that returns a fixed set of [`ObjectRef`]s for any
+/// triggering resource `T`.
+///
+/// The returned closure ignores the concrete value of `T` and always yields a
+/// clone of `refs`. Pass it to `kube_runtime::Controller::watches` to trigger
+/// reconciliation of a set of CRs whenever any `T` changes.
+///
+/// The triggering type `T` is unconstrained beyond `'static` — any resource
+/// type (including those without a `.spec`) may be used as a trigger.
+///
+/// See: <https://kube.rs/controllers/relations/#watched-relations>
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::owners::{make_object_refs_namespaced, make_object_ref_mapper};
+/// use koprs::traits::NamespacedResource;
+/// use k8s_openapi::api::core::v1::ConfigMap;
+/// use std::sync::Arc;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// let refs = make_object_refs_namespaced::<MyCR>(client, "my-namespace").await?;
+/// let mapper = make_object_ref_mapper::<ConfigMap, MyCR>(Arc::new(refs));
+/// # Ok(())
+/// # }
+/// ```
+pub fn make_object_ref_mapper<T, CR>(
+    refs: Arc<Vec<ObjectRef<CR>>>,
+) -> impl Fn(T) -> Vec<ObjectRef<CR>>
+where
+    CR: Clone + Resource<DynamicType = ()> + 'static,
+    T: 'static,
+{
+    move |_: T| (*refs).clone()
 }

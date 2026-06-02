@@ -4,9 +4,12 @@
 //
 // Strategy
 // --------
-// Owner reference helpers are pure functions over in-memory structs — no HTTP
-// call is ever made. Tests construct `ConfigMap` and `Deployment` values
-// directly from JSON, call the helpers, and assert on the returned fields.
+// Owner reference helpers (owner_ref, controller_ref, set_owner_refs) are pure
+// functions — no HTTP call is made. Tests construct values directly from JSON.
+//
+// ObjectRef helpers (make_object_refs*) do make API calls, so those tests spin
+// up a tower_test mock pair. make_object_ref_mapper is pure and tested without
+// a mock.
 
 #[cfg(test)]
 mod owners_tests {
@@ -170,5 +173,202 @@ mod owners_tests {
 
         let refs = child.meta().owner_references.as_ref().unwrap();
         assert_eq!(refs.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // make_object_refs / make_object_refs_namespaced / make_object_refs_cluster
+    // -----------------------------------------------------------------------
+
+    use http::{Request, Response, StatusCode};
+    use kube::client::Body;
+    use tower_test::mock;
+
+    type MockHandle = mock::Handle<Request<Body>, Response<Body>>;
+
+    fn mock_client() -> (kube::Client, MockHandle) {
+        let (svc, handle) = mock::pair::<Request<Body>, Response<Body>>();
+        (kube::Client::new(svc, "default"), handle)
+    }
+
+    fn json_response(body: serde_json::Value) -> Response<Body> {
+        let bytes = serde_json::to_vec(&body).unwrap();
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/json")
+            .body(Body::from(bytes))
+            .unwrap()
+    }
+
+    fn configmap_list(names: &[&str], namespace: &str) -> serde_json::Value {
+        let items: Vec<_> = names
+            .iter()
+            .map(|n| {
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": { "name": n, "namespace": namespace, "resourceVersion": "1" }
+                })
+            })
+            .collect();
+        json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMapList",
+            "metadata": { "resourceVersion": "1" },
+            "items": items
+        })
+    }
+
+    fn node_list(names: &[&str]) -> serde_json::Value {
+        let items: Vec<_> = names
+            .iter()
+            .map(|n| {
+                json!({
+                    "apiVersion": "v1",
+                    "kind": "Node",
+                    "metadata": { "name": n, "resourceVersion": "1" }
+                })
+            })
+            .collect();
+        json!({
+            "apiVersion": "v1",
+            "kind": "NodeList",
+            "metadata": { "resourceVersion": "1" },
+            "items": items
+        })
+    }
+
+    use crate::owners::{
+        make_object_ref_mapper, make_object_refs, make_object_refs_cluster,
+        make_object_refs_namespaced,
+    };
+    use crate::scope::{Cluster, Namespaced};
+
+    #[tokio::test]
+    async fn make_object_refs_namespaced_returns_one_ref_per_resource() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/my-ns/configmaps")
+            );
+            send.send_response(json_response(configmap_list(&["cm1", "cm2"], "my-ns")));
+        });
+
+        let refs = make_object_refs_namespaced::<ConfigMap>(client, "my-ns")
+            .await
+            .unwrap();
+        assert_eq!(refs.len(), 2);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn make_object_refs_cluster_returns_one_ref_per_node() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(uri.contains("/api/v1/nodes"), "uri={uri}");
+            assert!(!uri.contains("namespaces"), "uri={uri}");
+            send.send_response(json_response(node_list(&["n1", "n2", "n3"])));
+        });
+
+        use k8s_openapi::api::core::v1::Node;
+        let refs = make_object_refs_cluster::<Node>(client).await.unwrap();
+        assert_eq!(refs.len(), 3);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn make_object_refs_generic_namespaced_scopes_to_namespace() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/prod/configmaps")
+            );
+            send.send_response(json_response(configmap_list(&["cm-prod"], "prod")));
+        });
+
+        let refs = make_object_refs::<ConfigMap, _>(client, Namespaced("prod"))
+            .await
+            .unwrap();
+        assert_eq!(refs.len(), 1);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn make_object_refs_returns_empty_vec_when_no_resources() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(configmap_list(&[], "ns")));
+        });
+
+        let refs = make_object_refs::<ConfigMap, _>(client, Cluster)
+            .await
+            .unwrap();
+        assert!(refs.is_empty());
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // make_object_ref_mapper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn make_object_ref_mapper_returns_fixed_refs_for_any_trigger() {
+        use k8s_openapi::api::core::v1::Node;
+        use kube_runtime::reflector::ObjectRef;
+        use std::sync::Arc;
+
+        let ref1 = ObjectRef::<ConfigMap>::new("cm1");
+        let ref2 = ObjectRef::<ConfigMap>::new("cm2");
+        let refs = Arc::new(vec![ref1, ref2]);
+
+        let mapper = make_object_ref_mapper::<Node, ConfigMap>(refs.clone());
+
+        let node = serde_json::from_value::<Node>(json!({
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": { "name": "n1", "resourceVersion": "1" }
+        }))
+        .unwrap();
+
+        let result = mapper(node);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn make_object_ref_mapper_returns_independent_clones() {
+        use k8s_openapi::api::core::v1::Node;
+        use kube_runtime::reflector::ObjectRef;
+        use std::sync::Arc;
+
+        let refs = Arc::new(vec![ObjectRef::<ConfigMap>::new("cm1")]);
+        let mapper = make_object_ref_mapper::<Node, ConfigMap>(refs);
+
+        let node1 = serde_json::from_value::<Node>(json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": { "name": "n1", "resourceVersion": "1" }
+        }))
+        .unwrap();
+        let node2 = serde_json::from_value::<Node>(json!({
+            "apiVersion": "v1", "kind": "Node",
+            "metadata": { "name": "n2", "resourceVersion": "1" }
+        }))
+        .unwrap();
+
+        let r1 = mapper(node1);
+        let r2 = mapper(node2);
+        assert_eq!(r1.len(), 1);
+        assert_eq!(r2.len(), 1);
     }
 }
