@@ -84,6 +84,15 @@ where
     }
 }
 
+async fn patch_metadata_inner<T>(api: Api<T>, name: &str, patch: serde_json::Value) -> Result<T>
+where
+    T: KubeResource,
+{
+    Ok(api
+        .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await?)
+}
+
 // ---------------------------------------------------------------------------
 // Generic public API — apply
 // ---------------------------------------------------------------------------
@@ -715,4 +724,241 @@ where
     tokio::fs::write(path.as_ref(), json).await?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Generic public API — patch labels / annotations
+// ---------------------------------------------------------------------------
+
+/// Merge labels onto a Kubernetes resource without replacing existing ones.
+///
+/// Uses a JSON merge patch so only the specified keys are added or updated —
+/// other labels on the resource are preserved. Pass an empty slice to no-op.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`patch_labels_namespaced`] or [`patch_labels_cluster`] for the common cases.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_labels;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_labels::<MyCR, _>(
+///     client,
+///     Namespaced("my-ns"),
+///     "my-cr",
+///     &[("app.kubernetes.io/managed-by", "my-operator")],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_labels<T, Scope>(
+    client: Client,
+    scope: Scope,
+    name: &str,
+    labels: &[(&str, &str)],
+) -> Result<T>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    let kind = T::kind(&());
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching labels"),
+        None => info!(%kind, %name, "Patching labels"),
+    }
+    let map: serde_json::Map<String, serde_json::Value> = labels
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+        .collect();
+    let patch = serde_json::json!({ "metadata": { "labels": map } });
+    patch_metadata_inner(scope.into_api(client), name, patch).await
+}
+
+/// Merge labels onto a **namespace-scoped** resource.
+///
+/// Delegates to [`patch_labels`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_labels_namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_labels_namespaced::<MyCR>(
+///     client,
+///     "my-ns",
+///     "my-cr",
+///     &[("app.kubernetes.io/managed-by", "my-operator")],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_labels_namespaced<T>(
+    client: Client,
+    namespace: &str,
+    name: &str,
+    labels: &[(&str, &str)],
+) -> Result<T>
+where
+    T: NamespacedResource,
+{
+    patch_labels::<T, _>(client, Namespaced(namespace), name, labels).await
+}
+
+/// Merge labels onto a **cluster-scoped** resource.
+///
+/// Delegates to [`patch_labels`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_labels_cluster;
+/// use koprs::traits::ClusterResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_labels_cluster::<MyCR>(
+///     client,
+///     "my-cr",
+///     &[("app.kubernetes.io/managed-by", "my-operator")],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_labels_cluster<T>(
+    client: Client,
+    name: &str,
+    labels: &[(&str, &str)],
+) -> Result<T>
+where
+    T: ClusterResource,
+{
+    patch_labels::<T, _>(client, Cluster, name, labels).await
+}
+
+/// Merge annotations onto a Kubernetes resource without replacing existing ones.
+///
+/// Uses a JSON merge patch so only the specified keys are added or updated —
+/// other annotations on the resource are preserved.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`patch_annotations_namespaced`] or [`patch_annotations_cluster`] for the
+/// common cases.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_annotations;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_annotations::<MyCR, _>(
+///     client,
+///     Namespaced("my-ns"),
+///     "my-cr",
+///     &[("kubectl.kubernetes.io/last-applied-configuration", "...")],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_annotations<T, Scope>(
+    client: Client,
+    scope: Scope,
+    name: &str,
+    annotations: &[(&str, &str)],
+) -> Result<T>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    let kind = T::kind(&());
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching annotations"),
+        None => info!(%kind, %name, "Patching annotations"),
+    }
+    let map: serde_json::Map<String, serde_json::Value> = annotations
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+        .collect();
+    let patch = serde_json::json!({ "metadata": { "annotations": map } });
+    patch_metadata_inner(scope.into_api(client), name, patch).await
+}
+
+/// Merge annotations onto a **namespace-scoped** resource.
+///
+/// Delegates to [`patch_annotations`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_annotations_namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_annotations_namespaced::<MyCR>(
+///     client,
+///     "my-ns",
+///     "my-cr",
+///     &[("my-operator/last-synced", "2024-01-01")],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_annotations_namespaced<T>(
+    client: Client,
+    namespace: &str,
+    name: &str,
+    annotations: &[(&str, &str)],
+) -> Result<T>
+where
+    T: NamespacedResource,
+{
+    patch_annotations::<T, _>(client, Namespaced(namespace), name, annotations).await
+}
+
+/// Merge annotations onto a **cluster-scoped** resource.
+///
+/// Delegates to [`patch_annotations`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_annotations_cluster;
+/// use koprs::traits::ClusterResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_annotations_cluster::<MyCR>(
+///     client,
+///     "my-cr",
+///     &[("my-operator/last-synced", "2024-01-01")],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_annotations_cluster<T>(
+    client: Client,
+    name: &str,
+    annotations: &[(&str, &str)],
+) -> Result<T>
+where
+    T: ClusterResource,
+{
+    patch_annotations::<T, _>(client, Cluster, name, annotations).await
 }

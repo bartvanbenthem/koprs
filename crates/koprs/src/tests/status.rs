@@ -11,7 +11,10 @@ mod status_tests {
     use tower_test::mock;
 
     use crate::scope::{Cluster, Namespaced};
-    use crate::status::{patch_status, patch_status_cluster, patch_status_namespaced};
+    use crate::status::{
+        make_condition, patch_conditions, patch_conditions_cluster, patch_conditions_namespaced,
+        patch_status, patch_status_cluster, patch_status_namespaced, upsert_condition,
+    };
 
     // -----------------------------------------------------------------------
     // Harness
@@ -495,6 +498,174 @@ mod status_tests {
                 .await;
 
         assert!(result.is_err(), "expected Err on 500, got Ok");
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // make_condition — pure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn make_condition_sets_all_fields() {
+        let c = make_condition("Ready", "True", "Reconciled", "All good", Some(3));
+        assert_eq!(c.type_, "Ready");
+        assert_eq!(c.status, "True");
+        assert_eq!(c.reason, "Reconciled");
+        assert_eq!(c.message, "All good");
+        assert_eq!(c.observed_generation, Some(3));
+    }
+
+    #[test]
+    fn make_condition_sets_last_transition_time() {
+        let before = chrono::Utc::now();
+        let c = make_condition("Ready", "True", "R", "M", None);
+        let after = chrono::Utc::now();
+        assert!(c.last_transition_time.0 >= before);
+        assert!(c.last_transition_time.0 <= after);
+    }
+
+    // -----------------------------------------------------------------------
+    // upsert_condition — pure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn upsert_condition_appends_when_type_is_new() {
+        let mut conditions = vec![make_condition("Ready", "True", "R", "M", None)];
+        upsert_condition(
+            &mut conditions,
+            make_condition("Synced", "False", "R", "M", None),
+        );
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(conditions[1].type_, "Synced");
+    }
+
+    #[test]
+    fn upsert_condition_updates_existing_by_type() {
+        let mut conditions = vec![make_condition("Ready", "False", "Init", "Not ready", None)];
+        upsert_condition(
+            &mut conditions,
+            make_condition("Ready", "True", "Done", "Ready", None),
+        );
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].status, "True");
+        assert_eq!(conditions[0].reason, "Done");
+    }
+
+    #[test]
+    fn upsert_condition_preserves_transition_time_when_status_unchanged() {
+        let original = make_condition("Ready", "True", "R1", "M1", None);
+        let original_time = original.last_transition_time.clone();
+        let mut conditions = vec![original];
+
+        // Same status — should not update lastTransitionTime
+        let updated = make_condition("Ready", "True", "R2", "M2 updated", None);
+        upsert_condition(&mut conditions, updated);
+
+        assert_eq!(conditions[0].last_transition_time, original_time);
+        assert_eq!(conditions[0].message, "M2 updated");
+    }
+
+    #[test]
+    fn upsert_condition_updates_transition_time_when_status_changes() {
+        let original = make_condition("Ready", "False", "Init", "Not ready", None);
+        let original_time = original.last_transition_time.clone();
+        let mut conditions = vec![original];
+
+        // Status changed — lastTransitionTime must be updated
+        let updated = make_condition("Ready", "True", "Done", "Ready now", None);
+        let new_time = updated.last_transition_time.clone();
+        upsert_condition(&mut conditions, updated);
+
+        assert_ne!(conditions[0].last_transition_time, original_time);
+        assert_eq!(conditions[0].last_transition_time, new_time);
+    }
+
+    // -----------------------------------------------------------------------
+    // patch_conditions — API
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn patch_conditions_namespaced_sends_patch_to_status_subresource() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(
+                uri.contains("/namespaces/ns1/configmaps/cm1/status"),
+                "uri={uri}"
+            );
+            let body = read_body_json(req).await;
+            let conds = body["status"]["conditions"].as_array().unwrap();
+            assert_eq!(conds.len(), 1);
+            assert_eq!(conds[0]["type"], "Ready");
+            assert_eq!(conds[0]["status"], "True");
+            send.send_response(json_response(configmap_json("cm1", "ns1")));
+        });
+
+        let conditions = vec![make_condition("Ready", "True", "Reconciled", "OK", Some(1))];
+        patch_conditions_namespaced::<ConfigMap, _>(client, "ns1", "cm1", conditions, "my-op")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn patch_conditions_cluster_sends_patch_without_namespace_segment() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(uri.contains("/nodes/n1/status"), "uri={uri}");
+            assert!(!uri.contains("namespaces"), "uri={uri}");
+            send.send_response(json_response(node_json("n1")));
+        });
+
+        let conditions = vec![make_condition("Ready", "True", "R", "M", None)];
+        patch_conditions_cluster::<Node, _>(client, "n1", conditions, "my-op")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn patch_conditions_body_contains_api_version_and_kind() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let body = read_body_json(req).await;
+            assert_eq!(body["apiVersion"], "v1");
+            assert_eq!(body["kind"], "ConfigMap");
+            send.send_response(json_response(configmap_json("cm1", "ns1")));
+        });
+
+        let conditions = vec![make_condition("Ready", "True", "R", "M", None)];
+        patch_conditions::<ConfigMap, _, _>(client, Namespaced("ns1"), "cm1", conditions, "my-op")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn patch_conditions_propagates_server_errors() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(server_error_response());
+        });
+
+        let result = patch_conditions::<ConfigMap, _, _>(
+            client,
+            Namespaced("ns1"),
+            "cm1",
+            vec![make_condition("Ready", "True", "R", "M", None)],
+            "my-op",
+        )
+        .await;
+        assert!(result.is_err());
         server.await.unwrap();
     }
 }

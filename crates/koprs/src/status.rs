@@ -1,11 +1,14 @@
-use crate::error::Result;
-use crate::scope::{ApiScope, Cluster, Namespaced};
-use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
+use chrono::Utc;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
 use serde::Serialize;
 use serde_json::json;
 use tracing::info;
+
+use crate::error::Result;
+use crate::scope::{ApiScope, Cluster, Namespaced};
+use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
 // ---------------------------------------------------------------------------
 // Private core helper
@@ -208,4 +211,221 @@ where
     S: Serialize,
 {
     patch_status::<K, S, _>(client, Cluster, name, status, field_manager).await
+}
+
+// ---------------------------------------------------------------------------
+// Condition helpers — pure
+// ---------------------------------------------------------------------------
+
+/// Build a [`Condition`] with `lastTransitionTime` set to now.
+///
+/// Use [`upsert_condition`] to merge it into an existing conditions `Vec`
+/// before calling [`patch_conditions`].
+///
+/// # Examples
+///
+/// ```
+/// use koprs::status::make_condition;
+///
+/// let c = make_condition("Ready", "True", "Reconciled", "All good", None);
+/// assert_eq!(c.type_, "Ready");
+/// assert_eq!(c.status, "True");
+/// ```
+pub fn make_condition(
+    type_: impl Into<String>,
+    status: impl Into<String>,
+    reason: impl Into<String>,
+    message: impl Into<String>,
+    observed_generation: Option<i64>,
+) -> Condition {
+    Condition {
+        type_: type_.into(),
+        status: status.into(),
+        reason: reason.into(),
+        message: message.into(),
+        observed_generation,
+        last_transition_time: Time(Utc::now()),
+    }
+}
+
+/// Update-or-insert `new` into `conditions` by `type_`.
+///
+/// - If a condition with the same `type_` already exists **and its `status`
+///   has not changed**, `lastTransitionTime` is preserved so the transition
+///   clock is not reset unnecessarily.
+/// - If the `status` changed, `lastTransitionTime` from `new` is used.
+/// - If no matching condition exists, `new` is appended.
+///
+/// # Examples
+///
+/// ```
+/// use koprs::status::{make_condition, upsert_condition};
+///
+/// let mut conditions = vec![
+///     make_condition("Ready", "False", "Initializing", "Not ready yet", None),
+/// ];
+///
+/// // Status changed: lastTransitionTime will be updated
+/// upsert_condition(&mut conditions, make_condition("Ready", "True", "Reconciled", "Done", None));
+/// assert_eq!(conditions.len(), 1);
+/// assert_eq!(conditions[0].status, "True");
+/// ```
+pub fn upsert_condition(conditions: &mut Vec<Condition>, new: Condition) {
+    if let Some(existing) = conditions.iter_mut().find(|c| c.type_ == new.type_) {
+        let last_transition_time = if existing.status == new.status {
+            existing.last_transition_time.clone()
+        } else {
+            new.last_transition_time.clone()
+        };
+        *existing = new;
+        existing.last_transition_time = last_transition_time;
+    } else {
+        conditions.push(new);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Condition helpers — API
+// ---------------------------------------------------------------------------
+
+/// Patch `status.conditions` on a Kubernetes resource using Server-Side Apply.
+///
+/// Replaces the full conditions array owned by `field_manager`. The conditions
+/// are applied as part of the status subresource — the main spec is not touched.
+///
+/// `C` is the condition type — any `Serialize`-able value is accepted so
+/// callers can use their own CRD-specific condition struct (which must be
+/// declared in the CRD schema) rather than being forced to use
+/// [`k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition`].
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`patch_conditions_namespaced`] or [`patch_conditions_cluster`] for the
+/// common cases.
+///
+/// Build condition values with [`make_condition`] and merge them with
+/// [`upsert_condition`] before calling this function.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::scope::Namespaced;
+/// use koprs::status::{make_condition, patch_conditions};
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError>
+/// # where MyCR::DynamicType: Default {
+/// let conditions = vec![make_condition("Ready", "True", "Reconciled", "All good", Some(1))];
+/// patch_conditions::<MyCR, _, _>(client, Namespaced("my-ns"), "my-cr", conditions, "my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_conditions<K, C, Scope>(
+    client: Client,
+    scope: Scope,
+    name: &str,
+    conditions: Vec<C>,
+    field_manager: &str,
+) -> Result<K>
+where
+    K: KubeResource,
+    K::DynamicType: Default,
+    C: Serialize,
+    Scope: ApiScope<K>,
+{
+    let ctx = K::DynamicType::default();
+    let kind = K::kind(&ctx);
+
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching conditions"),
+        None => info!(%kind, %name, "Patching conditions"),
+    }
+
+    let patch = json!({
+        "apiVersion": K::api_version(&ctx),
+        "kind": kind,
+        "status": { "conditions": conditions },
+    });
+    let params = PatchParams::apply(field_manager).force();
+    let api: Api<K> = scope.into_api(client);
+    Ok(api
+        .patch_status(name, &params, &Patch::Apply(&patch))
+        .await?)
+}
+
+/// Patch `status.conditions` on a **namespace-scoped** resource.
+///
+/// Delegates to [`patch_conditions`] with [`Namespaced`] as the scope.
+/// `C` is the condition type — any `Serialize`-able value is accepted.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::status::{make_condition, patch_conditions_namespaced};
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError>
+/// # where MyCR::DynamicType: Default {
+/// let conditions = vec![make_condition("Ready", "True", "Reconciled", "All good", Some(1))];
+/// patch_conditions_namespaced::<MyCR, _>(client, "my-ns", "my-cr", conditions, "my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_conditions_namespaced<K, C>(
+    client: Client,
+    namespace: &str,
+    name: &str,
+    conditions: Vec<C>,
+    field_manager: &str,
+) -> Result<K>
+where
+    K: NamespacedResource,
+    K::DynamicType: Default,
+    C: Serialize,
+{
+    patch_conditions::<K, C, _>(
+        client,
+        Namespaced(namespace),
+        name,
+        conditions,
+        field_manager,
+    )
+    .await
+}
+
+/// Patch `status.conditions` on a **cluster-scoped** resource.
+///
+/// Delegates to [`patch_conditions`] with [`Cluster`] as the scope.
+/// `C` is the condition type — any `Serialize`-able value is accepted.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::status::{make_condition, patch_conditions_cluster};
+/// use koprs::traits::ClusterResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError>
+/// # where MyCR::DynamicType: Default {
+/// let conditions = vec![make_condition("Ready", "True", "Reconciled", "All good", Some(1))];
+/// patch_conditions_cluster::<MyCR, _>(client, "my-cr", conditions, "my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_conditions_cluster<K, C>(
+    client: Client,
+    name: &str,
+    conditions: Vec<C>,
+    field_manager: &str,
+) -> Result<K>
+where
+    K: ClusterResource,
+    K::DynamicType: Default,
+    C: Serialize,
+{
+    patch_conditions::<K, C, _>(client, Cluster, name, conditions, field_manager).await
 }

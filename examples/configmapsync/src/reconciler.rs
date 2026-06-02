@@ -11,6 +11,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use chrono::SecondsFormat;
+
 use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::runtime::controller::Action;
@@ -21,10 +23,12 @@ use tracing::{error, info, warn};
 use koprs::error::KubeGenericError;
 use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers_namespaced};
 use koprs::gc::gc_namespaced_resources;
-use koprs::resources::{apply_namespaced_resource, delete_namespaced_resource};
-use koprs::status::patch_status_namespaced;
+use koprs::resources::{
+    apply_namespaced_resource, delete_namespaced_resource, patch_labels_namespaced,
+};
+use koprs::status::{make_condition, patch_conditions_namespaced, patch_status_namespaced};
 
-use crate::types::{ConfigMapSync, ConfigMapSyncStatus};
+use crate::types::{ConfigMapSync, ConfigMapSyncStatus, SyncCondition};
 
 const FINALIZER: &str = "configmapsync.example.io/cleanup";
 const FIELD_MANAGER: &str = "configmapsync-operator";
@@ -112,7 +116,48 @@ pub async fn reconcile(
     })
     .await?;
 
-    // 4. Patch status back on the CR.
+    // 4. Stamp the target namespace as a label on the CR so it is visible
+    //    without fetching the full spec.
+    patch_labels_namespaced::<ConfigMapSync>(
+        client.clone(),
+        &namespace,
+        &name,
+        &[("configmapsync.example.io/synced-to", target_ns)],
+    )
+    .await?;
+
+    // 5. Patch the standard conditions array with a Ready=True condition.
+    //    We use koprs::status::make_condition to get the correct timestamp,
+    //    then convert to SyncCondition which is declared in the CRD schema.
+    let generation = cr.metadata.generation;
+    let koprs_condition = make_condition(
+        "Ready",
+        "True",
+        "ConfigMapSynced",
+        &format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'"),
+        generation,
+    );
+    let conditions = vec![SyncCondition {
+        type_: koprs_condition.type_,
+        status: koprs_condition.status,
+        reason: koprs_condition.reason,
+        message: koprs_condition.message,
+        last_transition_time: koprs_condition
+            .last_transition_time
+            .0
+            .to_rfc3339_opts(SecondsFormat::Secs, true),
+        observed_generation: koprs_condition.observed_generation,
+    }];
+    patch_conditions_namespaced::<ConfigMapSync, SyncCondition>(
+        client.clone(),
+        &namespace,
+        &name,
+        conditions,
+        FIELD_MANAGER,
+    )
+    .await?;
+
+    // 6. Patch the typed status (drives the READY printer column).
     patch_status_namespaced::<ConfigMapSync, ConfigMapSyncStatus>(
         client.clone(),
         &namespace,
@@ -120,6 +165,7 @@ pub async fn reconcile(
         ConfigMapSyncStatus {
             ready: true,
             message: format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'"),
+            conditions: vec![],
         },
         FIELD_MANAGER,
     )

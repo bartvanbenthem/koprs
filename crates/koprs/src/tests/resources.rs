@@ -36,7 +36,9 @@ mod resources_tests {
         delete_namespaced_resource, delete_resource, ensure_namespace, fetch_and_write_to_file,
         get_cluster_resource, get_namespaced_resource, get_resource, list_namespaced_resources,
         list_namespaced_resources_by_label, list_resource_names, list_resources,
-        list_resources_by_label, wait_for_resources_cluster, wait_for_resources_namespaced,
+        list_resources_by_label, patch_annotations, patch_annotations_cluster,
+        patch_annotations_namespaced, patch_labels, patch_labels_cluster, patch_labels_namespaced,
+        wait_for_resources_cluster, wait_for_resources_namespaced,
     };
     use crate::scope::{Cluster, Namespaced};
 
@@ -864,6 +866,160 @@ mod resources_tests {
 
         let result = apply_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op").await;
         assert!(result.is_err());
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Shared helper — read request body as JSON
+    // -----------------------------------------------------------------------
+
+    async fn read_body_json(req: http::Request<kube::client::Body>) -> serde_json::Value {
+        use http_body_util::BodyExt as _;
+        let bytes = req.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    // -----------------------------------------------------------------------
+    // patch_labels
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn patch_labels_namespaced_sends_merge_patch_with_labels() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::PATCH);
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/ns1/configmaps/cm1")
+            );
+            let body = read_body_json(req).await;
+            assert_eq!(
+                body["metadata"]["labels"]["app.kubernetes.io/managed-by"],
+                "my-op"
+            );
+            send.send_response(json_response(configmap_json("cm1", "ns1")));
+        });
+
+        patch_labels_namespaced::<ConfigMap>(
+            client,
+            "ns1",
+            "cm1",
+            &[("app.kubernetes.io/managed-by", "my-op")],
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn patch_labels_cluster_sends_patch_without_namespace_segment() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(uri.contains("/api/v1/nodes/n1"), "uri={uri}");
+            assert!(!uri.contains("namespaces"), "uri={uri}");
+            let body = read_body_json(req).await;
+            assert_eq!(body["metadata"]["labels"]["env"], "prod");
+            send.send_response(json_response(node_json("n1")));
+        });
+
+        patch_labels_cluster::<Node>(client, "n1", &[("env", "prod")])
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn patch_labels_sends_multiple_labels_in_one_patch() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let body = read_body_json(req).await;
+            assert_eq!(body["metadata"]["labels"]["a"], "1");
+            assert_eq!(body["metadata"]["labels"]["b"], "2");
+            send.send_response(json_response(configmap_json("cm1", "ns1")));
+        });
+
+        patch_labels::<ConfigMap, _>(client, Namespaced("ns1"), "cm1", &[("a", "1"), ("b", "2")])
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // patch_annotations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn patch_annotations_namespaced_sends_merge_patch_with_annotations() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::PATCH);
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/ns1/configmaps/cm1")
+            );
+            let body = read_body_json(req).await;
+            assert_eq!(body["metadata"]["annotations"]["my-op/synced"], "true");
+            send.send_response(json_response(configmap_json("cm1", "ns1")));
+        });
+
+        patch_annotations_namespaced::<ConfigMap>(
+            client,
+            "ns1",
+            "cm1",
+            &[("my-op/synced", "true")],
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn patch_annotations_cluster_sends_patch_without_namespace_segment() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(uri.contains("/api/v1/nodes/n1"), "uri={uri}");
+            assert!(!uri.contains("namespaces"), "uri={uri}");
+            let body = read_body_json(req).await;
+            assert_eq!(body["metadata"]["annotations"]["my-op/version"], "v1");
+            send.send_response(json_response(node_json("n1")));
+        });
+
+        patch_annotations_cluster::<Node>(client, "n1", &[("my-op/version", "v1")])
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn patch_annotations_body_is_nested_under_metadata() {
+        let (client, mut handle) = mock_client();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let body = read_body_json(req).await;
+            // Confirm no labels key leaks into annotations patch
+            assert!(body["metadata"]["labels"].is_null());
+            assert_eq!(body["metadata"]["annotations"]["k"], "v");
+            send.send_response(json_response(configmap_json("cm1", "ns1")));
+        });
+
+        patch_annotations::<ConfigMap, _>(client, Namespaced("ns1"), "cm1", &[("k", "v")])
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 }

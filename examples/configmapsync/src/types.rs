@@ -27,6 +27,31 @@ pub struct ConfigMapSyncSpec {
     pub data: std::collections::BTreeMap<String, String>,
 }
 
+/// A single status condition on a `ConfigMapSync` resource.
+///
+/// Mirrors the standard Kubernetes `metav1.Condition` shape so tooling such
+/// as `kubectl` can render it correctly, but is defined here so it appears in
+/// the CRD's OpenAPI schema (k8s_openapi's Condition does not derive
+/// JsonSchema).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
+pub struct SyncCondition {
+    /// The condition type, e.g. `"Ready"`.
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// `"True"`, `"False"`, or `"Unknown"`.
+    pub status: String,
+    /// Machine-readable reason token, e.g. `"ConfigMapSynced"`.
+    pub reason: String,
+    /// Human-readable description of the condition.
+    pub message: String,
+    /// RFC 3339 timestamp of the last status transition.
+    #[serde(rename = "lastTransitionTime")]
+    pub last_transition_time: String,
+    /// Generation of the CR observed when this condition was set.
+    #[serde(rename = "observedGeneration", skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+}
+
 /// Status section written back by the operator after each reconcile.
 /// Must derive JsonSchema because ConfigMapSync's CustomResource derive requires it.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
@@ -34,4 +59,7 @@ pub struct ConfigMapSyncSpec {
 pub struct ConfigMapSyncStatus {
     pub ready: bool,
     pub message: String,
+    /// Standard Kubernetes conditions array.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<SyncCondition>,
 }

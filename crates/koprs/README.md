@@ -43,6 +43,8 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 - **Watchers** — watch any resource type with optional label filtering, signal-based via `mpsc`
 - **Listing** — list resources across namespaces or within a namespace, with or without label selectors
 - **Ownership & controller wiring** — build `OwnerReference`s, set owner refs on children, generate `ObjectRef` sets, and create mapper closures for cross-resource reconcile triggers
+- **Status conditions** — build `Condition` values, update-or-insert with `lastTransitionTime` preservation, and patch `status.conditions` via SSA
+- **Patch labels / annotations** — merge labels or annotations onto any resource without replacing existing ones
 - **Persist to disk** — fetch a resource list and write it as JSON to a file
 - **Typed errors** — `KubeGenericError` enum via `thiserror`, pattern-matchable by callers
 
@@ -63,8 +65,8 @@ koprs = { path = "../koprs" }
 
 | Module | Description |
 |---|---|
-| `resources` | Apply, delete, get, list, poll, and fetch resources (cluster + namespaced) |
-| `status` | Patch `/status` subresource via SSA |
+| `resources` | Apply, delete, get, list, poll, patch labels/annotations, and fetch resources |
+| `status` | Patch `/status` subresource and `status.conditions` via SSA; condition helpers |
 | `finalizers` | Add and remove finalizers |
 | `gc` | Garbage collect orphaned resources |
 | `watcher` | Watch resources for changes via `mpsc` signals |
@@ -512,6 +514,52 @@ let refs = make_object_refs::(client.clone(), Cluster).await?;
 // Build a mapper for cross-resource reconcile triggers.
 // The triggering type T is unconstrained — any resource type may be a trigger.
 let mapper = make_object_ref_mapper::(Arc::new(refs));
+```
+
+### Status conditions
+
+```rust
+use koprs::status::{make_condition, upsert_condition, patch_conditions_namespaced};
+
+// Build a condition with lastTransitionTime = now
+let new_cond = make_condition("Ready", "True", "Reconciled", "All good", Some(generation));
+
+// Merge into the existing conditions Vec:
+// - preserves lastTransitionTime if status is unchanged
+// - updates it if status changed
+// - appends if the type is new
+upsert_condition(&mut existing_conditions, new_cond);
+
+// Patch status.conditions via SSA
+patch_conditions_namespaced::(
+    client.clone(),
+    "my-namespace",
+    "my-resource",
+    existing_conditions,
+    "my-operator",
+).await?;
+```
+
+### Patch labels and annotations
+
+```rust
+use koprs::resources::{patch_labels_namespaced, patch_annotations_namespaced};
+
+// Merge labels — existing labels on the resource are preserved
+patch_labels_namespaced::(
+    client.clone(),
+    "my-namespace",
+    "my-resource",
+    &[("app.kubernetes.io/managed-by", "my-operator")],
+).await?;
+
+// Merge annotations — existing annotations are preserved
+patch_annotations_namespaced::(
+    client.clone(),
+    "my-namespace",
+    "my-resource",
+    &[("my-operator/last-synced", "2024-01-01")],
+).await?;
 ```
 
 ### Persist to disk

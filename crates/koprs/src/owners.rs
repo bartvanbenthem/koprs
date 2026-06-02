@@ -1,5 +1,4 @@
 //! Resource relationship helpers.
-//!
 //! Covers two kinds of relationships between Kubernetes resources:
 //!
 //! - **Ownership** — [`owner_ref`], [`controller_ref`], and [`set_owner_refs`]

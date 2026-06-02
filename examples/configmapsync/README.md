@@ -35,8 +35,10 @@ On each reconcile the operator:
 1. **Adds a finalizer** to the CR to prevent deletion before cleanup runs.
 2. **Applies the ConfigMap** (`cms-<cr-name>`) in the target namespace using Server-Side Apply. The ConfigMap is labelled with `app.kubernetes.io/managed-by=configmapsync-operator`.
 3. **Garbage collects** any stale ConfigMaps previously owned by this CR.
-4. **Patches status** — writes `ready: true` and a human-readable message back onto the CR.
-5. **On deletion** — removes the synced ConfigMap, then strips the finalizer to allow the CR to be fully deleted.
+4. **Stamps a label** — adds `configmapsync.example.io/synced-to=<target-namespace>` to the CR so the sync target is visible without reading the spec.
+5. **Patches conditions** — writes a standard `Ready=True` condition (with `lastTransitionTime` and `observedGeneration`) to `status.conditions`.
+6. **Patches typed status** — writes `ready: true` and a human-readable message to drive the `READY` printer column.
+7. **On deletion** — removes the synced ConfigMap, then strips the finalizer to allow the CR to be fully deleted.
 
 Requeues every **300 seconds** for drift correction. Retries after **30 seconds** on error.
 
@@ -115,7 +117,7 @@ Cargo.toml
 |---|---|---|
 | `kube` | 1.1.0 | Kubernetes client + controller runtime |
 | `k8s-openapi` | 0.25.0 (v1_33) | Typed Kubernetes API objects |
-| `koprs` | 0.6.1 | Helper abstractions (SSA, finalizers, status patching, GC) |
+| `koprs` | 0.6.1 | Helper abstractions (SSA, finalizers, status patching, conditions, label patching, GC) |
 | `tokio` | 1.0 | Async runtime |
 | `tracing` / `tracing-subscriber` | 0.1 / 0.3 | Structured logging |
 
