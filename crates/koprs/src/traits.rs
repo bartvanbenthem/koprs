@@ -1,5 +1,4 @@
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use k8s_openapi::{ClusterResourceScope, Metadata, NamespaceResourceScope};
+use k8s_openapi::{ClusterResourceScope, NamespaceResourceScope};
 use kube::Resource;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -46,7 +45,6 @@ pub trait KubeResource:
     Clone
     + Debug
     + Resource<DynamicType = ()>
-    + Metadata<Ty = ObjectMeta>
     + DeserializeOwned
     + Serialize
     + Send
@@ -59,7 +57,6 @@ impl<T> KubeResource for T where
     T: Clone
         + Debug
         + Resource<DynamicType = ()>
-        + Metadata<Ty = ObjectMeta>
         + DeserializeOwned
         + Serialize
         + Send

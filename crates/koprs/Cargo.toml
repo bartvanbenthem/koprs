@@ -1,6 +1,6 @@
 [package]
 name = "koprs"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2024"
 description = "A reusable, ergonomic library that streamlines Kubernetes operator development, allowing developers to build controllers with significantly less code."
 license = "MIT"

@@ -586,7 +586,6 @@ where
 /// #         + std::fmt::Debug
 /// #         + serde::Serialize
 /// #         + for<'de> serde::Deserialize<'de>
-/// #         + k8s_openapi::Metadata<Ty = k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta>
 /// #         + Send
 /// #         + Sync
 /// #         + 'static,
