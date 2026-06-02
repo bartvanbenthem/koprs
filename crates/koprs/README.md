@@ -35,6 +35,15 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 
 ## Features
 
+### Controller framework
+- **`Reconciler` trait** — implement `reconcile` for your CRD; `error_policy` defaults to requeue after 30 s
+- **`ControllerBuilder`** — one fluent builder that wires the reconcile loop and the following operational concerns:
+  - **Health probes** — `.health_port(port)` starts `GET /healthz` + `GET /readyz` (readiness gates on first reconcile)
+  - **Graceful shutdown** — `.graceful_shutdown()` stops the loop cleanly on SIGTERM or Ctrl+C
+  - **Leader election** — `.leader_election(ns, name)` acquires and renews a Kubernetes `Lease`; only one replica reconciles at a time
+  - **Reconcile timeout** — `.reconcile_timeout(dur)` kills and requeues stuck reconciles
+
+### Resource operations
 - **Apply & delete** — cluster-scoped and namespaced resources via Server-Side Apply (SSA)
 - **Get** — fetch a single resource by name, returning `Option<T>` (`None` on 404)
 - **Status patching** — patch the `/status` subresource of any CRD, cluster-scoped or namespaced
@@ -45,7 +54,6 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 - **Ownership & controller wiring** — build `OwnerReference`s, set owner refs on children, generate `ObjectRef` sets, and create mapper closures for cross-resource reconcile triggers
 - **Status conditions** — `make_condition` builds a `Condition` with the current timestamp; `upsert_condition` merges it with `lastTransitionTime` preservation. Include conditions in your status struct and patch them with `patch_status_*`
 - **Patch labels / annotations** — merge labels or annotations onto any resource without replacing existing ones
-- **Persist to disk** — fetch a resource list and write it as JSON to a file
 - **Typed errors** — `KubeGenericError` enum via `thiserror`, pattern-matchable by callers
 
 ---
