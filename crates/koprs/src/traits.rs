@@ -42,14 +42,7 @@ use std::fmt::Debug;
 /// assert_kube_resource::<Pod>();
 /// ```
 pub trait KubeResource:
-    Clone
-    + Debug
-    + Resource<DynamicType = ()>
-    + DeserializeOwned
-    + Serialize
-    + Send
-    + Sync
-    + 'static
+    Clone + Debug + Resource<DynamicType = ()> + DeserializeOwned + Serialize + Send + Sync + 'static
 {
 }
 
