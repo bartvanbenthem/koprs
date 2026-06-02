@@ -36,9 +36,8 @@ On each reconcile the operator:
 2. **Applies the ConfigMap** (`cms-<cr-name>`) in the target namespace using Server-Side Apply. The ConfigMap is labelled with `app.kubernetes.io/managed-by=configmapsync-operator`.
 3. **Garbage collects** any stale ConfigMaps previously owned by this CR.
 4. **Stamps a label** — adds `configmapsync.example.io/synced-to=<target-namespace>` to the CR so the sync target is visible without reading the spec.
-5. **Patches conditions** — writes a standard `Ready=True` condition (with `lastTransitionTime` and `observedGeneration`) to `status.conditions`.
-6. **Patches typed status** — writes `ready: true` and a human-readable message to drive the `READY` printer column.
-7. **On deletion** — removes the synced ConfigMap, then strips the finalizer to allow the CR to be fully deleted.
+5. **Patches status** — writes `ready`, `message`, and a `Ready=True` condition (with `lastTransitionTime` and `observedGeneration`) in a single SSA patch. `lastTransitionTime` is preserved from the existing condition when `Ready` is already `True`, keeping the patch idempotent.
+6. **On deletion** — removes the synced ConfigMap, then strips the finalizer to allow the CR to be fully deleted.
 
 Requeues every **300 seconds** for drift correction. Retries after **30 seconds** on error.
 

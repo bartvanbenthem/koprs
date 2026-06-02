@@ -136,7 +136,11 @@ pub async fn reconcile(
     let last_transition_time = cr
         .status
         .as_ref()
-        .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Ready" && c.status == "True"))
+        .and_then(|s| {
+            s.conditions
+                .iter()
+                .find(|c| c.type_ == "Ready" && c.status == "True")
+        })
         .map(|c| c.last_transition_time.clone())
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
     patch_status_namespaced::<ConfigMapSync, ConfigMapSyncStatus>(
