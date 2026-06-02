@@ -57,7 +57,9 @@ pub struct SyncCondition {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigMapSyncStatus {
+    #[serde(default)]
     pub ready: bool,
+    #[serde(default)]
     pub message: String,
     /// Standard Kubernetes conditions array.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

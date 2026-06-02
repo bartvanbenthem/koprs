@@ -26,7 +26,7 @@ use koprs::gc::gc_namespaced_resources;
 use koprs::resources::{
     apply_namespaced_resource, delete_namespaced_resource, patch_labels_namespaced,
 };
-use koprs::status::{make_condition, patch_conditions_namespaced, patch_status_namespaced};
+use koprs::status::patch_status_namespaced;
 
 use crate::types::{ConfigMapSync, ConfigMapSyncStatus, SyncCondition};
 
@@ -126,38 +126,19 @@ pub async fn reconcile(
     )
     .await?;
 
-    // 5. Patch the standard conditions array with a Ready=True condition.
-    //    We use koprs::status::make_condition to get the correct timestamp,
-    //    then convert to SyncCondition which is declared in the CRD schema.
+    // 5. Write the full status in one SSA patch so a single field manager owns
+    //    all status fields. Two separate patches by the same manager would cause
+    //    each one to drop the other's fields on every reconcile, triggering an
+    //    endless watch-event loop.
+    //    Preserve lastTransitionTime when Ready is already True so this patch
+    //    is idempotent and does not bump resourceVersion on unchanged reconciles.
     let generation = cr.metadata.generation;
-    let koprs_condition = make_condition(
-        "Ready",
-        "True",
-        "ConfigMapSynced",
-        &format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'"),
-        generation,
-    );
-    let conditions = vec![SyncCondition {
-        type_: koprs_condition.type_,
-        status: koprs_condition.status,
-        reason: koprs_condition.reason,
-        message: koprs_condition.message,
-        last_transition_time: koprs_condition
-            .last_transition_time
-            .0
-            .to_rfc3339_opts(SecondsFormat::Secs, true),
-        observed_generation: koprs_condition.observed_generation,
-    }];
-    patch_conditions_namespaced::<ConfigMapSync, SyncCondition>(
-        client.clone(),
-        &namespace,
-        &name,
-        conditions,
-        FIELD_MANAGER,
-    )
-    .await?;
-
-    // 6. Patch the typed status (drives the READY printer column).
+    let last_transition_time = cr
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.iter().find(|c| c.type_ == "Ready" && c.status == "True"))
+        .map(|c| c.last_transition_time.clone())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
     patch_status_namespaced::<ConfigMapSync, ConfigMapSyncStatus>(
         client.clone(),
         &namespace,
@@ -165,7 +146,14 @@ pub async fn reconcile(
         ConfigMapSyncStatus {
             ready: true,
             message: format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'"),
-            conditions: vec![],
+            conditions: vec![SyncCondition {
+                type_: "Ready".to_string(),
+                status: "True".to_string(),
+                reason: "ConfigMapSynced".to_string(),
+                message: format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'"),
+                last_transition_time,
+                observed_generation: generation,
+            }],
         },
         FIELD_MANAGER,
     )
