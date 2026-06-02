@@ -43,7 +43,7 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 - **Watchers** — watch any resource type with optional label filtering, signal-based via `mpsc`
 - **Listing** — list resources across namespaces or within a namespace, with or without label selectors
 - **Ownership & controller wiring** — build `OwnerReference`s, set owner refs on children, generate `ObjectRef` sets, and create mapper closures for cross-resource reconcile triggers
-- **Status conditions** — build `Condition` values, update-or-insert with `lastTransitionTime` preservation, and patch `status.conditions` via SSA
+- **Status conditions** — `make_condition` builds a `Condition` with the current timestamp; `upsert_condition` merges it with `lastTransitionTime` preservation. Include conditions in your status struct and patch them with `patch_status_*`
 - **Patch labels / annotations** — merge labels or annotations onto any resource without replacing existing ones
 - **Persist to disk** — fetch a resource list and write it as JSON to a file
 - **Typed errors** — `KubeGenericError` enum via `thiserror`, pattern-matchable by callers
@@ -66,7 +66,7 @@ koprs = { path = "../koprs" }
 | Module | Description |
 |---|---|
 | `resources` | Apply, delete, get, list, poll, patch labels/annotations, and fetch resources |
-| `status` | Patch `/status` subresource and `status.conditions` via SSA; condition helpers |
+| `status` | Patch `/status` subresource via SSA; `make_condition` and `upsert_condition` helpers |
 | `finalizers` | Add and remove finalizers |
 | `gc` | Garbage collect orphaned resources |
 | `watcher` | Watch resources for changes via `mpsc` signals |

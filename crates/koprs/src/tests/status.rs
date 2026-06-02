@@ -12,8 +12,8 @@ mod status_tests {
 
     use crate::scope::{Cluster, Namespaced};
     use crate::status::{
-        make_condition, patch_conditions, patch_conditions_cluster, patch_conditions_namespaced,
-        patch_status, patch_status_cluster, patch_status_namespaced, upsert_condition,
+        make_condition, patch_status, patch_status_cluster, patch_status_namespaced,
+        upsert_condition,
     };
 
     // -----------------------------------------------------------------------
@@ -578,94 +578,5 @@ mod status_tests {
 
         assert_ne!(conditions[0].last_transition_time, original_time);
         assert_eq!(conditions[0].last_transition_time, new_time);
-    }
-
-    // -----------------------------------------------------------------------
-    // patch_conditions — API
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn patch_conditions_namespaced_sends_patch_to_status_subresource() {
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            let (req, send) = handle.next_request().await.unwrap();
-            let uri = req.uri().to_string();
-            assert!(
-                uri.contains("/namespaces/ns1/configmaps/cm1/status"),
-                "uri={uri}"
-            );
-            let body = read_body_json(req).await;
-            let conds = body["status"]["conditions"].as_array().unwrap();
-            assert_eq!(conds.len(), 1);
-            assert_eq!(conds[0]["type"], "Ready");
-            assert_eq!(conds[0]["status"], "True");
-            send.send_response(json_response(configmap_json("cm1", "ns1")));
-        });
-
-        let conditions = vec![make_condition("Ready", "True", "Reconciled", "OK", Some(1))];
-        patch_conditions_namespaced::<ConfigMap, _>(client, "ns1", "cm1", conditions, "my-op")
-            .await
-            .unwrap();
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn patch_conditions_cluster_sends_patch_without_namespace_segment() {
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            let (req, send) = handle.next_request().await.unwrap();
-            let uri = req.uri().to_string();
-            assert!(uri.contains("/nodes/n1/status"), "uri={uri}");
-            assert!(!uri.contains("namespaces"), "uri={uri}");
-            send.send_response(json_response(node_json("n1")));
-        });
-
-        let conditions = vec![make_condition("Ready", "True", "R", "M", None)];
-        patch_conditions_cluster::<Node, _>(client, "n1", conditions, "my-op")
-            .await
-            .unwrap();
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn patch_conditions_body_contains_api_version_and_kind() {
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            let (req, send) = handle.next_request().await.unwrap();
-            let body = read_body_json(req).await;
-            assert_eq!(body["apiVersion"], "v1");
-            assert_eq!(body["kind"], "ConfigMap");
-            send.send_response(json_response(configmap_json("cm1", "ns1")));
-        });
-
-        let conditions = vec![make_condition("Ready", "True", "R", "M", None)];
-        patch_conditions::<ConfigMap, _, _>(client, Namespaced("ns1"), "cm1", conditions, "my-op")
-            .await
-            .unwrap();
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn patch_conditions_propagates_server_errors() {
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(server_error_response());
-        });
-
-        let result = patch_conditions::<ConfigMap, _, _>(
-            client,
-            Namespaced("ns1"),
-            "cm1",
-            vec![make_condition("Ready", "True", "R", "M", None)],
-            "my-op",
-        )
-        .await;
-        assert!(result.is_err());
-        server.await.unwrap();
     }
 }
