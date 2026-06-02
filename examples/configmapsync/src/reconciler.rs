@@ -99,7 +99,7 @@ pub async fn reconcile(
     // -----------------------------------------------------------------------
 
     // 1. Ensure finalizer is present.
-    add_finalizer_namespaced::<ConfigMapSync>(client.clone(), &namespace, &name, FINALIZER).await?;
+    add_finalizer_namespaced::<ConfigMapSync>(client.clone(), &cr, FINALIZER).await?;
 
     // 2. Build and apply the desired ConfigMap via koprs SSA.
     let target_ns = &cr.spec.target_namespace;

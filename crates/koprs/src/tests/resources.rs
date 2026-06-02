@@ -33,8 +33,8 @@ mod resources_tests {
     // Pull in the functions under test.
     use crate::resources::{
         apply_cluster_resource, apply_namespaced_resource, apply_resource, delete_cluster_resource,
-        delete_namespaced_resource, delete_resource, ensure_namespace, fetch_and_write_to_file,
-        get_cluster_resource, get_namespaced_resource, get_resource, list_namespaced_resources,
+        delete_namespaced_resource, delete_resource, ensure_namespace, get_cluster_resource,
+        get_namespaced_resource, get_resource, list_namespaced_resources,
         list_namespaced_resources_by_label, list_resource_names, list_resources,
         list_resources_by_label, patch_annotations, patch_annotations_cluster,
         patch_annotations_namespaced, patch_labels, patch_labels_cluster, patch_labels_namespaced,
@@ -785,54 +785,6 @@ mod resources_tests {
         .unwrap();
 
         assert_eq!(items.len(), 1);
-        server.await.unwrap();
-    }
-
-    // -----------------------------------------------------------------------
-    // fetch_and_write_to_file
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn fetch_and_write_to_file_creates_valid_json_file() {
-        let (client, mut handle) = mock_client();
-        let tmp = tempfile::tempdir().unwrap();
-
-        let server = tokio::spawn(async move {
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(single_configmap_list("cm1", "default")));
-        });
-
-        fetch_and_write_to_file::<ConfigMap, _>(client, tmp.path(), "out.json")
-            .await
-            .unwrap();
-
-        let content = std::fs::read_to_string(tmp.path().join("out.json")).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let items = parsed.as_array().unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0]["metadata"]["name"], "cm1");
-
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn fetch_and_write_to_file_writes_empty_array_when_no_resources() {
-        let (client, mut handle) = mock_client();
-        let tmp = tempfile::tempdir().unwrap();
-
-        let server = tokio::spawn(async move {
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(empty_configmap_list()));
-        });
-
-        fetch_and_write_to_file::<ConfigMap, _>(client, tmp.path(), "empty.json")
-            .await
-            .unwrap();
-
-        let content = std::fs::read_to_string(tmp.path().join("empty.json")).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed, json!([]));
-
         server.await.unwrap();
     }
 

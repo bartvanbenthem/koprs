@@ -1,12 +1,10 @@
 use std::collections::HashSet;
-use std::path::Path;
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams};
 use kube::core::ObjectMeta;
 use kube::{Api, Client, ResourceExt};
-use serde::Serialize;
 use tracing::{error, info};
 
 use crate::error::Result;
@@ -683,47 +681,6 @@ where
     T: ClusterResource,
 {
     wait_for_resources::<T, _>(client, Cluster, interval).await
-}
-
-// ---------------------------------------------------------------------------
-// Fetch and persist
-// ---------------------------------------------------------------------------
-
-/// Fetch all resources of type `T` and write them as JSON to a file on disk.
-///
-/// # Examples
-///
-/// ```no_run
-/// use koprs::error::KubeGenericError;
-/// use kube::Client;
-/// use k8s_openapi::api::core::v1::Pod;
-/// use koprs::resources::fetch_and_write_to_file;
-///
-/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
-/// // Use _ to let the compiler infer the path type automatically
-/// fetch_and_write_to_file::<Pod, _>(client, "/tmp", "pods.json").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn fetch_and_write_to_file<T, P>(client: Client, path: P, file_name: &str) -> Result<()>
-where
-    T: KubeResource,
-    P: AsRef<Path>,
-{
-    let file_path = path.as_ref().join(file_name);
-    let list = list_resources::<T>(client).await?;
-    write_json_to_file(&list.items, &file_path).await
-}
-
-async fn write_json_to_file<T, P>(items: &[T], path: P) -> Result<()>
-where
-    T: Serialize,
-    P: AsRef<Path>,
-{
-    let json = serde_json::to_string_pretty(items)?;
-    tokio::fs::write(path.as_ref(), json).await?;
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

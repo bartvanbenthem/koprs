@@ -97,7 +97,8 @@ let deleted = delete_namespaced_resource::<MyCR>(client.clone(), "my-ns", "my-cr
 ```rust
 use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers_namespaced};
 
-add_finalizer_namespaced::<MyCR>(client.clone(), "my-ns", "my-cr", "my-operator/cleanup").await?;
+// No-op if the finalizer is already present — safe to call on every reconcile.
+add_finalizer_namespaced::<MyCR>(client.clone(), &cr, "my-operator/cleanup").await?;
 remove_finalizers_namespaced::<MyCR>(client.clone(), "my-ns", "my-cr").await?;
 ```
 
@@ -205,11 +206,12 @@ pub enum KubeGenericError {
     Kube(kube::Error),
     MissingMetadata(String),
     Serialization(serde_json::Error),
-    Other(anyhow::Error),
+    Io(std::io::Error),
+    Internal(String),
 }
 ```
 
-`KubeGenericError` implements `std::error::Error` via `thiserror`, so it composes naturally with `anyhow` and the `?` operator. Variants are pattern-matchable for cases where you need to handle specific failures — for example, distinguishing a missing resource from a permission error:
+`KubeGenericError` implements `std::error::Error` via `thiserror` and composes with the `?` operator. Variants are pattern-matchable for cases where you need to handle specific failures — for example, distinguishing a missing resource from a permission error:
 
 ```rust
 use koprs::error::KubeGenericError;
