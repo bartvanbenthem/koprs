@@ -12,6 +12,38 @@ use crate::scope::{ApiScope, Cluster, Namespaced};
 use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
 // ---------------------------------------------------------------------------
+// EnsureOutcome
+// ---------------------------------------------------------------------------
+
+/// The outcome of an [`ensure_resource`] call.
+///
+/// Callers can branch on this to skip downstream work (status patches, event
+/// emissions) when the resource was already in the desired state.
+#[derive(Debug)]
+pub enum EnsureOutcome<T> {
+    /// The resource did not exist and was created.
+    Created(T),
+    /// The resource existed but differed from the desired state; SSA corrected it.
+    Updated(T),
+    /// The resource already matched the desired state; no write was made.
+    Unchanged(T),
+}
+
+impl<T> EnsureOutcome<T> {
+    /// Unwrap the inner resource regardless of outcome.
+    pub fn into_resource(self) -> T {
+        match self {
+            Self::Created(r) | Self::Updated(r) | Self::Unchanged(r) => r,
+        }
+    }
+
+    /// Returns `true` if the resource was written (created or updated).
+    pub fn was_changed(&self) -> bool {
+        matches!(self, Self::Created(_) | Self::Updated(_))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Namespace
 // ---------------------------------------------------------------------------
 
@@ -411,6 +443,150 @@ where
     T: ClusterResource,
 {
     get_resource::<T, _>(client, Cluster, name).await
+}
+
+// ---------------------------------------------------------------------------
+// Generic public API — ensure
+// ---------------------------------------------------------------------------
+
+/// Ensure a resource exists and matches the desired state, using Server-Side Apply.
+///
+/// Performs a GET before the SSA and compares `resourceVersion` to determine
+/// whether the resource was created, updated, or left unchanged. Returns an
+/// [`EnsureOutcome`] so callers can skip downstream work on
+/// [`EnsureOutcome::Unchanged`].
+///
+/// This costs 2 API calls (GET + SSA) versus 1 for plain [`apply_resource`].
+/// The benefit is knowing the outcome — useful when downstream steps (status
+/// patches, event emissions) should only run on actual change.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`ensure_namespaced_resource`] or [`ensure_cluster_resource`] for the common cases.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::{ensure_resource, EnsureOutcome};
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client, resource: MyCR) -> Result<(), KubeGenericError> {
+/// match ensure_resource::<MyCR, _>(client, Namespaced("my-namespace"), &resource, "my-operator").await? {
+///     EnsureOutcome::Created(_)   => { /* handle create */ }
+///     EnsureOutcome::Updated(_)   => { /* handle drift correction */ }
+///     EnsureOutcome::Unchanged(_) => { /* skip downstream work */ }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn ensure_resource<T, Scope>(
+    client: Client,
+    scope: Scope,
+    resource: &T,
+    field_manager: &str,
+) -> Result<EnsureOutcome<T>>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    let name = resource.meta().name.as_deref().unwrap_or("[unnamed]");
+    let kind = T::kind(&());
+
+    match scope.namespace() {
+        Some(ns) => info!(%ns, %kind, %name, "Ensuring resource"),
+        None => info!(%kind, %name, "Ensuring resource"),
+    }
+
+    let api = scope.into_api(client);
+
+    let live_rv = get_resource_inner(api.clone(), name)
+        .await?
+        .and_then(|r| r.meta().resource_version.clone());
+
+    let applied = apply_resource_inner(api, resource, field_manager).await?;
+    let applied_rv = applied.meta().resource_version.clone();
+
+    let outcome = match live_rv {
+        None => {
+            info!(%kind, %name, "Resource created");
+            EnsureOutcome::Created(applied)
+        }
+        Some(old_rv) if applied_rv.as_deref() != Some(&old_rv) => {
+            info!(%kind, %name, "Resource updated");
+            EnsureOutcome::Updated(applied)
+        }
+        _ => {
+            info!(%kind, %name, "Resource unchanged");
+            EnsureOutcome::Unchanged(applied)
+        }
+    };
+
+    Ok(outcome)
+}
+
+/// Ensure a **namespace-scoped** resource exists and matches the desired state.
+///
+/// Delegates to [`ensure_resource`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::{ensure_namespaced_resource, EnsureOutcome};
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client, resource: MyCR) -> Result<(), KubeGenericError> {
+/// let outcome = ensure_namespaced_resource::<MyCR>(client, "my-namespace", &resource, "my-operator").await?;
+/// if outcome.was_changed() {
+///     // patch status, emit event, etc.
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn ensure_namespaced_resource<T>(
+    client: Client,
+    namespace: &str,
+    resource: &T,
+    field_manager: &str,
+) -> Result<EnsureOutcome<T>>
+where
+    T: NamespacedResource,
+{
+    ensure_resource::<T, _>(client, Namespaced(namespace), resource, field_manager).await
+}
+
+/// Ensure a **cluster-scoped** resource exists and matches the desired state.
+///
+/// Delegates to [`ensure_resource`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::{ensure_cluster_resource, EnsureOutcome};
+/// use koprs::traits::ClusterResource;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client, resource: MyCR) -> Result<(), KubeGenericError> {
+/// let outcome = ensure_cluster_resource::<MyCR>(client, &resource, "my-operator").await?;
+/// if outcome.was_changed() {
+///     // patch status, emit event, etc.
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn ensure_cluster_resource<T>(
+    client: Client,
+    resource: &T,
+    field_manager: &str,
+) -> Result<EnsureOutcome<T>>
+where
+    T: ClusterResource,
+{
+    ensure_resource::<T, _>(client, Cluster, resource, field_manager).await
 }
 
 // ---------------------------------------------------------------------------

@@ -32,9 +32,10 @@ mod resources_tests {
 
     // Pull in the functions under test.
     use crate::resources::{
-        apply_cluster_resource, apply_namespaced_resource, apply_resource, delete_cluster_resource,
-        delete_namespaced_resource, delete_resource, ensure_namespace, get_cluster_resource,
-        get_namespaced_resource, get_resource, list_namespaced_resources,
+        EnsureOutcome, apply_cluster_resource, apply_namespaced_resource, apply_resource,
+        delete_cluster_resource, delete_namespaced_resource, delete_resource,
+        ensure_cluster_resource, ensure_namespace, ensure_namespaced_resource, ensure_resource,
+        get_cluster_resource, get_namespaced_resource, get_resource, list_namespaced_resources,
         list_namespaced_resources_by_label, list_resource_names, list_resources,
         list_resources_by_label, patch_annotations, patch_annotations_cluster,
         patch_annotations_namespaced, patch_labels, patch_labels_cluster, patch_labels_namespaced,
@@ -973,5 +974,240 @@ mod resources_tests {
             .await
             .unwrap();
         server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // ensure_resource
+    // -----------------------------------------------------------------------
+
+    // Helper: configmap JSON with a specific resourceVersion.
+    fn configmap_json_rv(name: &str, namespace: &str, rv: &str) -> serde_json::Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": { "name": name, "namespace": namespace, "resourceVersion": rv }
+        })
+    }
+
+    fn node_json_rv(name: &str, rv: &str) -> serde_json::Value {
+        json!({
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": { "name": name, "resourceVersion": rv }
+        })
+    }
+
+    #[tokio::test]
+    async fn ensure_resource_returns_created_when_resource_does_not_exist() {
+        let (client, mut handle) = mock_client();
+        let cm = serde_json::from_value::<ConfigMap>(configmap_json("cm1", "ns1")).unwrap();
+
+        let server = tokio::spawn(async move {
+            // GET → 404 (resource absent)
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::GET);
+            send.send_response(not_found_response());
+
+            // SSA PATCH → returns the newly-created object
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::PATCH);
+            send.send_response(json_response(configmap_json_rv("cm1", "ns1", "1")));
+        });
+
+        let outcome = ensure_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, EnsureOutcome::Created(_)));
+        assert!(outcome.was_changed());
+        assert_eq!(
+            outcome.into_resource().metadata.name.as_deref(),
+            Some("cm1")
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_resource_returns_updated_when_resource_version_changed() {
+        let (client, mut handle) = mock_client();
+        let cm = serde_json::from_value::<ConfigMap>(configmap_json("cm1", "ns1")).unwrap();
+
+        let server = tokio::spawn(async move {
+            // GET → existing resource at rv "1"
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::GET);
+            send.send_response(json_response(configmap_json_rv("cm1", "ns1", "1")));
+
+            // SSA → server applied a change, rv advances to "2"
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::PATCH);
+            send.send_response(json_response(configmap_json_rv("cm1", "ns1", "2")));
+        });
+
+        let outcome = ensure_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, EnsureOutcome::Updated(_)));
+        assert!(outcome.was_changed());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_resource_returns_unchanged_when_resource_version_same() {
+        let (client, mut handle) = mock_client();
+        let cm = serde_json::from_value::<ConfigMap>(configmap_json("cm1", "ns1")).unwrap();
+
+        let server = tokio::spawn(async move {
+            // GET → rv "1"
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(configmap_json_rv("cm1", "ns1", "1")));
+
+            // SSA → no change, rv stays "1"
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(configmap_json_rv("cm1", "ns1", "1")));
+        });
+
+        let outcome = ensure_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, EnsureOutcome::Unchanged(_)));
+        assert!(!outcome.was_changed());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_resource_propagates_get_error() {
+        let (client, mut handle) = mock_client();
+        let cm = serde_json::from_value::<ConfigMap>(configmap_json("cm1", "ns1")).unwrap();
+
+        let server = tokio::spawn(async move {
+            // GET → 500; no PATCH should follow
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(server_error_response());
+        });
+
+        let result = ensure_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op").await;
+        assert!(result.is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_resource_propagates_apply_error_after_get() {
+        let (client, mut handle) = mock_client();
+        let cm = serde_json::from_value::<ConfigMap>(configmap_json("cm1", "ns1")).unwrap();
+
+        let server = tokio::spawn(async move {
+            // GET → 404 (absent)
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(not_found_response());
+
+            // SSA → 500
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(server_error_response());
+        });
+
+        let result = ensure_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op").await;
+        assert!(result.is_err());
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // ensure_namespaced_resource / ensure_cluster_resource
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn ensure_namespaced_resource_sends_get_then_patch_to_correct_uri() {
+        let (client, mut handle) = mock_client();
+        let cm = serde_json::from_value::<ConfigMap>(configmap_json("cm1", "ns1")).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::GET);
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/ns1/configmaps/cm1")
+            );
+            send.send_response(not_found_response());
+
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::PATCH);
+            assert!(
+                req.uri()
+                    .to_string()
+                    .contains("/namespaces/ns1/configmaps/cm1")
+            );
+            send.send_response(json_response(configmap_json_rv("cm1", "ns1", "1")));
+        });
+
+        let outcome = ensure_namespaced_resource::<ConfigMap>(client, "ns1", &cm, "op")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, EnsureOutcome::Created(_)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ensure_cluster_resource_sends_get_and_patch_without_namespace_segment() {
+        let (client, mut handle) = mock_client();
+        let node = serde_json::from_value::<Node>(node_json("n1")).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::GET);
+            let uri = req.uri().to_string();
+            assert!(uri.contains("/api/v1/nodes/n1"), "uri={uri}");
+            assert!(!uri.contains("namespaces"), "uri={uri}");
+            send.send_response(json_response(node_json_rv("n1", "1")));
+
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), http::Method::PATCH);
+            let uri = req.uri().to_string();
+            assert!(uri.contains("/api/v1/nodes/n1"), "uri={uri}");
+            assert!(!uri.contains("namespaces"), "uri={uri}");
+            // same rv → unchanged
+            send.send_response(json_response(node_json_rv("n1", "1")));
+        });
+
+        let outcome = ensure_cluster_resource::<Node>(client, &node, "op")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, EnsureOutcome::Unchanged(_)));
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // EnsureOutcome helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ensure_outcome_into_resource_unwraps_all_variants() {
+        let cm = serde_json::from_value::<ConfigMap>(configmap_json("cm1", "ns1")).unwrap();
+
+        let created = EnsureOutcome::Created(cm.clone());
+        assert_eq!(
+            created.into_resource().metadata.name.as_deref(),
+            Some("cm1")
+        );
+
+        let updated = EnsureOutcome::Updated(cm.clone());
+        assert_eq!(
+            updated.into_resource().metadata.name.as_deref(),
+            Some("cm1")
+        );
+
+        let unchanged = EnsureOutcome::Unchanged(cm);
+        assert_eq!(
+            unchanged.into_resource().metadata.name.as_deref(),
+            Some("cm1")
+        );
+    }
+
+    #[test]
+    fn ensure_outcome_was_changed_reflects_variant() {
+        let cm = serde_json::from_value::<ConfigMap>(configmap_json("cm1", "ns1")).unwrap();
+
+        assert!(EnsureOutcome::<ConfigMap>::Created(cm.clone()).was_changed());
+        assert!(EnsureOutcome::<ConfigMap>::Updated(cm.clone()).was_changed());
+        assert!(!EnsureOutcome::<ConfigMap>::Unchanged(cm).was_changed());
     }
 }
