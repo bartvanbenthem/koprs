@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*"]
+members = ["crates/*", "examples/configmapsync"]
 resolver = "2"
 
 [workspace.package]
@@ -10,8 +10,8 @@ repository = "https://github.com/bartvanbenthem/operator-sdk-rs"
 description = "SDK for building Kubernetes applications in Rust. Provides high level APIs, useful abstractions, and project scaffolding."
 
 [workspace.dependencies]
-kube = { version = "0.95", features = ["runtime", "derive"] }
-kube-runtime = "0.95"
+kube = { version = "1.1.0", features = ["runtime", "derive"] }
+kube-runtime = "1.1.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 schemars = "0.8"
