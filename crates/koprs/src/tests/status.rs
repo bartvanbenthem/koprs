@@ -11,7 +11,10 @@ mod status_tests {
     use tower_test::mock;
 
     use crate::scope::{Cluster, Namespaced};
-    use crate::status::{patch_status, patch_status_cluster, patch_status_namespaced};
+    use crate::status::{
+        make_condition, patch_status, patch_status_cluster, patch_status_namespaced,
+        upsert_condition,
+    };
 
     // -----------------------------------------------------------------------
     // Harness
@@ -496,5 +499,84 @@ mod status_tests {
 
         assert!(result.is_err(), "expected Err on 500, got Ok");
         server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // make_condition — pure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn make_condition_sets_all_fields() {
+        let c = make_condition("Ready", "True", "Reconciled", "All good", Some(3));
+        assert_eq!(c.type_, "Ready");
+        assert_eq!(c.status, "True");
+        assert_eq!(c.reason, "Reconciled");
+        assert_eq!(c.message, "All good");
+        assert_eq!(c.observed_generation, Some(3));
+    }
+
+    #[test]
+    fn make_condition_sets_last_transition_time() {
+        let before = chrono::Utc::now();
+        let c = make_condition("Ready", "True", "R", "M", None);
+        let after = chrono::Utc::now();
+        assert!(c.last_transition_time.0 >= before);
+        assert!(c.last_transition_time.0 <= after);
+    }
+
+    // -----------------------------------------------------------------------
+    // upsert_condition — pure
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn upsert_condition_appends_when_type_is_new() {
+        let mut conditions = vec![make_condition("Ready", "True", "R", "M", None)];
+        upsert_condition(
+            &mut conditions,
+            make_condition("Synced", "False", "R", "M", None),
+        );
+        assert_eq!(conditions.len(), 2);
+        assert_eq!(conditions[1].type_, "Synced");
+    }
+
+    #[test]
+    fn upsert_condition_updates_existing_by_type() {
+        let mut conditions = vec![make_condition("Ready", "False", "Init", "Not ready", None)];
+        upsert_condition(
+            &mut conditions,
+            make_condition("Ready", "True", "Done", "Ready", None),
+        );
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].status, "True");
+        assert_eq!(conditions[0].reason, "Done");
+    }
+
+    #[test]
+    fn upsert_condition_preserves_transition_time_when_status_unchanged() {
+        let original = make_condition("Ready", "True", "R1", "M1", None);
+        let original_time = original.last_transition_time.clone();
+        let mut conditions = vec![original];
+
+        // Same status — should not update lastTransitionTime
+        let updated = make_condition("Ready", "True", "R2", "M2 updated", None);
+        upsert_condition(&mut conditions, updated);
+
+        assert_eq!(conditions[0].last_transition_time, original_time);
+        assert_eq!(conditions[0].message, "M2 updated");
+    }
+
+    #[test]
+    fn upsert_condition_updates_transition_time_when_status_changes() {
+        let original = make_condition("Ready", "False", "Init", "Not ready", None);
+        let original_time = original.last_transition_time.clone();
+        let mut conditions = vec![original];
+
+        // Status changed — lastTransitionTime must be updated
+        let updated = make_condition("Ready", "True", "Done", "Ready now", None);
+        let new_time = updated.last_transition_time.clone();
+        upsert_condition(&mut conditions, updated);
+
+        assert_ne!(conditions[0].last_transition_time, original_time);
+        assert_eq!(conditions[0].last_transition_time, new_time);
     }
 }

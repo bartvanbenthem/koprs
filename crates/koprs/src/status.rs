@@ -1,11 +1,14 @@
-use crate::error::Result;
-use crate::scope::{ApiScope, Cluster, Namespaced};
-use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
+use chrono::Utc;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
 use serde::Serialize;
 use serde_json::json;
 use tracing::info;
+
+use crate::error::Result;
+use crate::scope::{ApiScope, Cluster, Namespaced};
+use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
 // ---------------------------------------------------------------------------
 // Private core helper
@@ -208,4 +211,75 @@ where
     S: Serialize,
 {
     patch_status::<K, S, _>(client, Cluster, name, status, field_manager).await
+}
+
+// ---------------------------------------------------------------------------
+// Condition helpers — pure
+// ---------------------------------------------------------------------------
+
+/// Build a [`Condition`] with `lastTransitionTime` set to now.
+///
+/// Use [`upsert_condition`] to merge it into an existing conditions `Vec`
+/// before calling [`patch_status`].
+///
+/// # Examples
+///
+/// ```
+/// use koprs::status::make_condition;
+///
+/// let c = make_condition("Ready", "True", "Reconciled", "All good", None);
+/// assert_eq!(c.type_, "Ready");
+/// assert_eq!(c.status, "True");
+/// ```
+pub fn make_condition(
+    type_: impl Into<String>,
+    status: impl Into<String>,
+    reason: impl Into<String>,
+    message: impl Into<String>,
+    observed_generation: Option<i64>,
+) -> Condition {
+    Condition {
+        type_: type_.into(),
+        status: status.into(),
+        reason: reason.into(),
+        message: message.into(),
+        observed_generation,
+        last_transition_time: Time(Utc::now()),
+    }
+}
+
+/// Update-or-insert `new` into `conditions` by `type_`.
+///
+/// - If a condition with the same `type_` already exists **and its `status`
+///   has not changed**, `lastTransitionTime` is preserved so the transition
+///   clock is not reset unnecessarily.
+/// - If the `status` changed, `lastTransitionTime` from `new` is used.
+/// - If no matching condition exists, `new` is appended.
+///
+/// # Examples
+///
+/// ```
+/// use koprs::status::{make_condition, upsert_condition};
+///
+/// let mut conditions = vec![
+///     make_condition("Ready", "False", "Initializing", "Not ready yet", None),
+/// ];
+///
+/// // Status changed: lastTransitionTime will be updated
+/// upsert_condition(&mut conditions, make_condition("Ready", "True", "Reconciled", "Done", None));
+/// assert_eq!(conditions.len(), 1);
+/// assert_eq!(conditions[0].status, "True");
+/// ```
+pub fn upsert_condition(conditions: &mut Vec<Condition>, new: Condition) {
+    if let Some(existing) = conditions.iter_mut().find(|c| c.type_ == new.type_) {
+        let last_transition_time = if existing.status == new.status {
+            existing.last_transition_time.clone()
+        } else {
+            new.last_transition_time.clone()
+        };
+        *existing = new;
+        existing.last_transition_time = last_transition_time;
+    } else {
+        conditions.push(new);
+    }
 }

@@ -1,15 +1,13 @@
 use std::collections::HashSet;
-use std::path::Path;
 use std::time::Duration;
 
 use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams};
 use kube::core::ObjectMeta;
-use kube::{Api, Client, Resource, ResourceExt};
-use serde::Serialize;
+use kube::{Api, Client, ResourceExt};
 use tracing::{error, info};
 
-use crate::error::{KubeGenericError, Result};
+use crate::error::Result;
 use crate::scope::{ApiScope, Cluster, Namespaced};
 use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
@@ -71,6 +69,26 @@ where
         Err(kube::Error::Api(e)) if e.code == 404 => Ok(false),
         Err(e) => Err(e.into()),
     }
+}
+
+async fn get_resource_inner<T>(api: Api<T>, name: &str) -> Result<Option<T>>
+where
+    T: KubeResource,
+{
+    match api.get(name).await {
+        Ok(r) => Ok(Some(r)),
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn patch_metadata_inner<T>(api: Api<T>, name: &str, patch: serde_json::Value) -> Result<T>
+where
+    T: KubeResource,
+{
+    Ok(api
+        .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
+        .await?)
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +306,114 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Generic public API — get
+// ---------------------------------------------------------------------------
+
+/// Get a single Kubernetes resource by name, returning `None` if it does not exist.
+///
+/// Returns `Ok(None)` on a 404 response rather than an error, so callers can
+/// branch on existence without pattern-matching on [`crate::error::KubeGenericError`].
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`get_namespaced_resource`] or [`get_cluster_resource`] for the common cases.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::get_resource;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// match get_resource::<MyCR, _>(client, Namespaced("my-namespace"), "my-cr").await? {
+///     Some(cr) => println!("found: {}", cr.meta().name.as_deref().unwrap_or("")),
+///     None => println!("not found"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn get_resource<T, Scope>(client: Client, scope: Scope, name: &str) -> Result<Option<T>>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    let kind = T::kind(&());
+    match scope.namespace() {
+        Some(namespace) => info!(%namespace, %kind, %name, "Getting resource"),
+        None => info!(%kind, %name, "Getting resource"),
+    }
+    get_resource_inner(scope.into_api(client), name).await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — get namespaced
+// ---------------------------------------------------------------------------
+
+/// Get a single **namespace-scoped** resource by name, returning `None` if it
+/// does not exist.
+///
+/// Delegates to [`get_resource`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::get_namespaced_resource;
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// if let Some(cr) = get_namespaced_resource::<MyCR>(client, "my-namespace", "my-cr").await? {
+///     println!("found: {}", cr.meta().name.as_deref().unwrap_or(""));
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn get_namespaced_resource<T>(
+    client: Client,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<T>>
+where
+    T: NamespacedResource,
+{
+    get_resource::<T, _>(client, Namespaced(namespace), name).await
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrappers — get cluster-scoped
+// ---------------------------------------------------------------------------
+
+/// Get a single **cluster-scoped** resource by name, returning `None` if it
+/// does not exist.
+///
+/// Delegates to [`get_resource`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::get_cluster_resource;
+/// use koprs::traits::ClusterResource;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// if let Some(cr) = get_cluster_resource::<MyCR>(client, "my-cr").await? {
+///     println!("found: {}", cr.meta().name.as_deref().unwrap_or(""));
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn get_cluster_resource<T>(client: Client, name: &str) -> Result<Option<T>>
+where
+    T: ClusterResource,
+{
+    get_resource::<T, _>(client, Cluster, name).await
+}
+
+// ---------------------------------------------------------------------------
 // Listing
 // ---------------------------------------------------------------------------
 
@@ -362,6 +488,34 @@ where
 {
     let api: Api<T> = Api::namespaced(client, namespace);
     Ok(api.list(&Default::default()).await?)
+}
+
+/// List all resources of type `T` in a specific namespace matching a label selector.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use koprs::resources::list_namespaced_resources_by_label;
+///
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
+/// let pods = list_namespaced_resources_by_label::<Pod>(client, "my-namespace", "app=my-operator").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn list_namespaced_resources_by_label<T>(
+    client: Client,
+    namespace: &str,
+    label_selector: &str,
+) -> Result<ObjectList<T>>
+where
+    T: NamespacedResource,
+{
+    let api: Api<T> = Api::namespaced(client, namespace);
+    let lp = ListParams::default().labels(label_selector);
+    Ok(api.list(&lp).await?)
 }
 
 /// List the names of all resources of type `T` matching a label selector,
@@ -530,209 +684,238 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// ObjectRef helpers
+// Generic public API — patch labels / annotations
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Private core helpers
-// ---------------------------------------------------------------------------
-
-async fn build_object_refs<T>(api: Api<T>) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
-where
-    T: Resource<DynamicType = ()> + Clone + std::fmt::Debug + serde::de::DeserializeOwned,
-{
-    let resources = api.list(&Default::default()).await?;
-    let mut refs = Vec::new();
-    for resource in resources.items {
-        let meta = resource.meta();
-        let name = meta
-            .name
-            .clone()
-            .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))?;
-        info!(%name, "Building ObjectRef");
-        refs.push(kube_runtime::reflector::ObjectRef::new(&name));
-    }
-    Ok(refs)
-}
-
-// ---------------------------------------------------------------------------
-// Generic public API
-// ---------------------------------------------------------------------------
-
-/// Generate `ObjectRef`s for all instances of a resource type.
+/// Merge labels onto a Kubernetes resource without replacing existing ones.
 ///
-/// Works for both namespaced and cluster-scoped resources — pass [`Namespaced`]
-/// or [`Cluster`] as the `scope` argument to select the correct API surface at
-/// compile time.
+/// Uses a JSON merge patch so only the specified keys are added or updated —
+/// other labels on the resource are preserved. Pass an empty slice to no-op.
 ///
-/// Prefer [`make_object_refs_namespaced`] or [`make_object_refs_cluster`] for
-/// the common cases — they are thin wrappers around this function.
-///
-/// Useful for setting up watched relations in `kube-runtime` controllers.
-/// See: <https://kube.rs/controllers/relations/#watched-relations>
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`patch_labels_namespaced`] or [`patch_labels_cluster`] for the common cases.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use koprs::error::KubeGenericError;
-/// use kube::Client;
-/// use koprs::resources::make_object_refs;
+/// use koprs::resources::patch_labels;
 /// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
 ///
-/// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
-/// # where
-/// #     MyCR: kube::Resource<DynamicType = (), Scope = k8s_openapi::NamespaceResourceScope>
-/// #         + Clone
-/// #         + std::fmt::Debug
-/// #         + serde::Serialize
-/// #         + for<'de> serde::Deserialize<'de>
-/// #         + Send
-/// #         + Sync
-/// #         + 'static,
-/// # {
-/// let refs = make_object_refs::<MyCR, _>(client, Namespaced("my-namespace")).await?;
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_labels::<MyCR, _>(
+///     client,
+///     Namespaced("my-ns"),
+///     "my-cr",
+///     &[("app.kubernetes.io/managed-by", "my-operator")],
+/// ).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn make_object_refs<T, Scope>(
+pub async fn patch_labels<T, Scope>(
     client: Client,
     scope: Scope,
-) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+    name: &str,
+    labels: &[(&str, &str)],
+) -> Result<T>
 where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
-    build_object_refs(scope.into_api(client)).await
+    let kind = T::kind(&());
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching labels"),
+        None => info!(%kind, %name, "Patching labels"),
+    }
+    let map: serde_json::Map<String, serde_json::Value> = labels
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+        .collect();
+    let patch = serde_json::json!({ "metadata": { "labels": map } });
+    patch_metadata_inner(scope.into_api(client), name, patch).await
 }
 
-// ---------------------------------------------------------------------------
-// Convenience wrappers — namespaced
-// ---------------------------------------------------------------------------
-
-/// Generate `ObjectRef`s for all instances of a **namespace-scoped** resource type.
+/// Merge labels onto a **namespace-scoped** resource.
 ///
-/// Delegates to [`make_object_refs`] with [`Namespaced`] as the scope. The
-/// resource type `T` must implement `Resource<Scope = NamespaceResourceScope>`,
-/// which the compiler enforces — passing a cluster-scoped type is a compile
-/// error.
-///
-/// Useful for setting up watched relations in `kube-runtime` controllers.
-/// See: <https://kube.rs/controllers/relations/#watched-relations>
+/// Delegates to [`patch_labels`] with [`Namespaced`] as the scope.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_labels_namespaced;
+/// use koprs::traits::NamespacedResource;
 /// use kube::Client;
-/// use koprs::resources::make_object_refs_namespaced;
 ///
-/// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
-/// # where
-/// #     MyCR: koprs::traits::NamespacedResource,
-/// # {
-/// let refs = make_object_refs_namespaced::<MyCR>(client, "my-namespace").await?;
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_labels_namespaced::<MyCR>(
+///     client,
+///     "my-ns",
+///     "my-cr",
+///     &[("app.kubernetes.io/managed-by", "my-operator")],
+/// ).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn make_object_refs_namespaced<T>(
+pub async fn patch_labels_namespaced<T>(
     client: Client,
     namespace: &str,
-) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+    name: &str,
+    labels: &[(&str, &str)],
+) -> Result<T>
 where
     T: NamespacedResource,
 {
-    make_object_refs::<T, _>(client, Namespaced(namespace)).await
+    patch_labels::<T, _>(client, Namespaced(namespace), name, labels).await
 }
 
-// ---------------------------------------------------------------------------
-// Convenience wrappers — cluster-scoped
-// ---------------------------------------------------------------------------
-
-/// Generate `ObjectRef`s for all instances of a **cluster-scoped** resource type.
+/// Merge labels onto a **cluster-scoped** resource.
 ///
-/// Delegates to [`make_object_refs`] with [`Cluster`] as the scope. The
-/// resource type `T` must implement `Resource<Scope = ClusterResourceScope>`,
-/// which the compiler enforces — passing a namespace-scoped type is a compile
-/// error.
-///
-/// Useful for setting up watched relations in `kube-runtime` controllers.
-/// See: <https://kube.rs/controllers/relations/#watched-relations>
+/// Delegates to [`patch_labels`] with [`Cluster`] as the scope.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_labels_cluster;
+/// use koprs::traits::ClusterResource;
 /// use kube::Client;
-/// use koprs::resources::make_object_refs_cluster;
 ///
-/// # async fn example<MyCR>(client: Client) -> Result<(), KubeGenericError>
-/// # where
-/// #     MyCR: koprs::traits::ClusterResource,
-/// # {
-/// let refs = make_object_refs_cluster::<MyCR>(client).await?;
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_labels_cluster::<MyCR>(
+///     client,
+///     "my-cr",
+///     &[("app.kubernetes.io/managed-by", "my-operator")],
+/// ).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn make_object_refs_cluster<T>(
+pub async fn patch_labels_cluster<T>(
     client: Client,
-) -> Result<Vec<kube_runtime::reflector::ObjectRef<T>>>
+    name: &str,
+    labels: &[(&str, &str)],
+) -> Result<T>
 where
     T: ClusterResource,
 {
-    make_object_refs::<T, _>(client, Cluster).await
+    patch_labels::<T, _>(client, Cluster, name, labels).await
 }
 
-/// Build a mapper function that returns a fixed set of `ObjectRef`s for any
-/// triggering resource. Useful for cross-resource reconcile triggers.
+/// Merge annotations onto a Kubernetes resource without replacing existing ones.
 ///
-/// See: <https://kube.rs/controllers/relations/#watched-relations>
-pub fn make_object_ref_mapper<T, CR>(
-    refs: std::sync::Arc<Vec<kube_runtime::reflector::ObjectRef<CR>>>,
-) -> impl Fn(T) -> Vec<kube_runtime::reflector::ObjectRef<CR>>
-where
-    CR: Clone + Resource<DynamicType = ()> + 'static,
-    T: kube::core::object::HasSpec + 'static,
-{
-    move |_: T| (*refs).clone()
-}
-
-// ---------------------------------------------------------------------------
-// Fetch and persist
-// ---------------------------------------------------------------------------
-
-/// Fetch all resources of type `T` and write them as JSON to a file on disk.
+/// Uses a JSON merge patch so only the specified keys are added or updated —
+/// other annotations on the resource are preserved.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`patch_annotations_namespaced`] or [`patch_annotations_cluster`] for the
+/// common cases.
 ///
 /// # Examples
 ///
 /// ```no_run
 /// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_annotations;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
 /// use kube::Client;
-/// use k8s_openapi::api::core::v1::Pod;
-/// use koprs::resources::fetch_and_write_to_file;
 ///
-/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
-/// // Use _ to let the compiler infer the path type automatically
-/// fetch_and_write_to_file::<Pod, _>(client, "/tmp", "pods.json").await?;
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_annotations::<MyCR, _>(
+///     client,
+///     Namespaced("my-ns"),
+///     "my-cr",
+///     &[("kubectl.kubernetes.io/last-applied-configuration", "...")],
+/// ).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn fetch_and_write_to_file<T, P>(client: Client, path: P, file_name: &str) -> Result<()>
+pub async fn patch_annotations<T, Scope>(
+    client: Client,
+    scope: Scope,
+    name: &str,
+    annotations: &[(&str, &str)],
+) -> Result<T>
 where
     T: KubeResource,
-    P: AsRef<Path>,
+    Scope: ApiScope<T>,
 {
-    let file_path = path.as_ref().join(file_name);
-    let list = list_resources::<T>(client).await?;
-    write_json_to_file(&list.items, &file_path).await
+    let kind = T::kind(&());
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching annotations"),
+        None => info!(%kind, %name, "Patching annotations"),
+    }
+    let map: serde_json::Map<String, serde_json::Value> = annotations
+        .iter()
+        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
+        .collect();
+    let patch = serde_json::json!({ "metadata": { "annotations": map } });
+    patch_metadata_inner(scope.into_api(client), name, patch).await
 }
 
-async fn write_json_to_file<T, P>(items: &[T], path: P) -> Result<()>
+/// Merge annotations onto a **namespace-scoped** resource.
+///
+/// Delegates to [`patch_annotations`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_annotations_namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_annotations_namespaced::<MyCR>(
+///     client,
+///     "my-ns",
+///     "my-cr",
+///     &[("my-operator/last-synced", "2024-01-01")],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_annotations_namespaced<T>(
+    client: Client,
+    namespace: &str,
+    name: &str,
+    annotations: &[(&str, &str)],
+) -> Result<T>
 where
-    T: Serialize,
-    P: AsRef<Path>,
+    T: NamespacedResource,
 {
-    let json = serde_json::to_string_pretty(items)?;
-    tokio::fs::write(path.as_ref(), json).await?;
+    patch_annotations::<T, _>(client, Namespaced(namespace), name, annotations).await
+}
 
-    Ok(())
+/// Merge annotations onto a **cluster-scoped** resource.
+///
+/// Delegates to [`patch_annotations`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::patch_annotations_cluster;
+/// use koprs::traits::ClusterResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// patch_annotations_cluster::<MyCR>(
+///     client,
+///     "my-cr",
+///     &[("my-operator/last-synced", "2024-01-01")],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn patch_annotations_cluster<T>(
+    client: Client,
+    name: &str,
+    annotations: &[(&str, &str)],
+) -> Result<T>
+where
+    T: ClusterResource,
+{
+    patch_annotations::<T, _>(client, Cluster, name, annotations).await
 }

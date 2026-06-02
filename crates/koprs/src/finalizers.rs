@@ -29,7 +29,8 @@ where
 
 /// Add a finalizer to a Kubernetes resource using a strategic merge patch.
 ///
-/// Existing finalizers are preserved — only the new one is appended.
+/// If the finalizer is already present on the resource the function returns
+/// immediately without making an API call, keeping the patch idempotent.
 ///
 /// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
 /// correct API surface at compile time. Prefer [`add_finalizer_namespaced`]
@@ -45,11 +46,11 @@ where
 /// use koprs::scope::Namespaced;
 /// use koprs::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// # async fn example<MyCR: NamespacedResource>(client: Client, resource: &MyCR) -> Result<(), KubeGenericError> {
 /// add_finalizer::<MyCR, _>(
 ///     client,
 ///     Namespaced("my-namespace"),
-///     "my-resource",
+///     resource,
 ///     "my-operator/cleanup",
 /// ).await?;
 /// # Ok(())
@@ -58,13 +59,30 @@ where
 pub async fn add_finalizer<T, Scope>(
     client: Client,
     scope: Scope,
-    name: &str,
+    resource: &T,
     finalizer: &str,
 ) -> Result<T>
 where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
+    let name = resource
+        .meta()
+        .name
+        .as_deref()
+        .ok_or_else(|| crate::error::KubeGenericError::MissingMetadata("name".into()))?;
+
+    if resource
+        .meta()
+        .finalizers
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .any(|f| f == finalizer)
+    {
+        return Ok(resource.clone());
+    }
+
     let kind = T::kind(&());
     match scope.namespace() {
         Some(namespace) => info!(%namespace, %kind, %name, %finalizer, "Adding finalizer"),
@@ -124,9 +142,8 @@ where
 
 /// Add a finalizer to a **namespace-scoped** resource.
 ///
-/// Delegates to [`add_finalizer`] with [`Namespaced`] as the scope. The
-/// resource type `T` must implement [`NamespacedResource`], which the compiler
-/// enforces — passing a cluster-scoped type is a compile error.
+/// Extracts the namespace from the resource's metadata. If the finalizer is
+/// already present, returns immediately without making an API call.
 ///
 /// # Examples
 ///
@@ -136,26 +153,21 @@ where
 /// use koprs::finalizers::add_finalizer_namespaced;
 /// use koprs::traits::NamespacedResource;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
-/// add_finalizer_namespaced::<MyCR>(
-///     client,
-///     "my-namespace",
-///     "my-resource",
-///     "my-operator/cleanup",
-/// ).await?;
+/// # async fn example<MyCR: NamespacedResource>(client: Client, resource: &MyCR) -> Result<(), KubeGenericError> {
+/// add_finalizer_namespaced::<MyCR>(client, resource, "my-operator/cleanup").await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn add_finalizer_namespaced<T>(
-    client: Client,
-    namespace: &str,
-    name: &str,
-    finalizer: &str,
-) -> Result<T>
+pub async fn add_finalizer_namespaced<T>(client: Client, resource: &T, finalizer: &str) -> Result<T>
 where
     T: NamespacedResource,
 {
-    add_finalizer::<T, _>(client, Namespaced(namespace), name, finalizer).await
+    let namespace = resource
+        .meta()
+        .namespace
+        .as_deref()
+        .ok_or_else(|| crate::error::KubeGenericError::MissingMetadata("namespace".into()))?;
+    add_finalizer::<T, _>(client, Namespaced(namespace), resource, finalizer).await
 }
 
 /// Remove all finalizers from a **namespace-scoped** resource.
@@ -198,9 +210,8 @@ where
 
 /// Add a finalizer to a **cluster-scoped** resource.
 ///
-/// Delegates to [`add_finalizer`] with [`Cluster`] as the scope. The resource
-/// type `T` must implement [`ClusterResource`], which the compiler enforces —
-/// passing a namespace-scoped type is a compile error.
+/// If the finalizer is already present, returns immediately without making an
+/// API call.
 ///
 /// # Examples
 ///
@@ -210,20 +221,16 @@ where
 /// use koprs::finalizers::add_finalizer_cluster;
 /// use koprs::traits::ClusterResource;
 ///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
-/// add_finalizer_cluster::<MyCR>(
-///     client,
-///     "my-resource",
-///     "my-operator/cleanup",
-/// ).await?;
+/// # async fn example<MyCR: ClusterResource>(client: Client, resource: &MyCR) -> Result<(), KubeGenericError> {
+/// add_finalizer_cluster::<MyCR>(client, resource, "my-operator/cleanup").await?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn add_finalizer_cluster<T>(client: Client, name: &str, finalizer: &str) -> Result<T>
+pub async fn add_finalizer_cluster<T>(client: Client, resource: &T, finalizer: &str) -> Result<T>
 where
     T: ClusterResource,
 {
-    add_finalizer::<T, _>(client, Cluster, name, finalizer).await
+    add_finalizer::<T, _>(client, Cluster, resource, finalizer).await
 }
 
 /// Remove all finalizers from a **cluster-scoped** resource.

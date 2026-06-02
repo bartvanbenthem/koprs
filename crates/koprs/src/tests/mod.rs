@@ -3,6 +3,7 @@
 mod error;
 mod finalizers;
 mod gc;
+mod owners;
 mod resources;
 mod scope;
 mod status;

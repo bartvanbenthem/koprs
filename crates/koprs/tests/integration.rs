@@ -422,10 +422,9 @@ async fn test_add_and_remove_namespaced_finalizer() {
         .unwrap();
 
     // Add finalizer
-    let with_fin =
-        add_finalizer_namespaced::<ConfigMap>(client.clone(), ns, &name, "koprs/finalizer")
-            .await
-            .expect("add_finalizer_namespaced failed");
+    let with_fin = add_finalizer_namespaced::<ConfigMap>(client.clone(), &cm, "koprs/finalizer")
+        .await
+        .expect("add_finalizer_namespaced failed");
 
     assert!(
         with_fin
@@ -472,7 +471,7 @@ async fn test_add_and_remove_cluster_finalizer() {
         .unwrap();
 
     // Add finalizer
-    let with_fin = add_finalizer_cluster::<ClusterRole>(client.clone(), &name, "koprs/finalizer")
+    let with_fin = add_finalizer_cluster::<ClusterRole>(client.clone(), &cr, "koprs/finalizer")
         .await
         .expect("add_finalizer_cluster failed");
 

@@ -17,12 +17,6 @@ mod error_tests {
     }
 
     #[test]
-    fn internal_display_contains_message() {
-        let err = KubeGenericError::Internal("something went wrong".to_string());
-        assert_eq!(err.to_string(), "Internal error: something went wrong");
-    }
-
-    #[test]
     fn io_display_contains_underlying_message() {
         let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
         let err = KubeGenericError::Io(io_err);
@@ -105,16 +99,6 @@ mod error_tests {
         }
     }
 
-    #[test]
-    fn internal_stores_message() {
-        let err = KubeGenericError::Internal("reconcile loop failed".to_string());
-        if let KubeGenericError::Internal(msg) = err {
-            assert_eq!(msg, "reconcile loop failed");
-        } else {
-            panic!("expected Internal variant");
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Result type alias
     // -----------------------------------------------------------------------
@@ -127,7 +111,7 @@ mod error_tests {
 
     #[test]
     fn result_err_variant_carries_error() {
-        let r: Result<()> = Err(KubeGenericError::Internal("oops".to_string()));
+        let r: Result<()> = Err(KubeGenericError::MissingMetadata("oops".to_string()));
         assert!(r.is_err());
     }
 
@@ -139,14 +123,12 @@ mod error_tests {
     fn all_variants_implement_debug_without_panicking() {
         let variants: &[KubeGenericError] = &[
             KubeGenericError::MissingMetadata("x".to_string()),
-            KubeGenericError::Internal("x".to_string()),
             KubeGenericError::Io(io::Error::new(io::ErrorKind::Other, "x")),
             KubeGenericError::Serialization(
                 serde_json::from_str::<serde_json::Value>("!").unwrap_err(),
             ),
         ];
         for v in variants {
-            // format! must not panic
             let _ = format!("{v:?}");
         }
     }
