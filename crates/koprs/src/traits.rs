@@ -1,6 +1,6 @@
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use k8s_openapi::{ClusterResourceScope, Metadata, NamespaceResourceScope};
 use kube::Resource;
-use kube::core::ObjectMeta;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
