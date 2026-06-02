@@ -57,7 +57,7 @@ async fn apply_resource_inner<T>(api: Api<T>, resource: &T, field_manager: &str)
 where
     T: KubeResource,
 {
-    let name = resource.metadata().name.as_deref().unwrap_or("[unnamed]");
+    let name = resource.meta().name.as_deref().unwrap_or("[unnamed]");
     let params = PatchParams::apply(field_manager).force();
     Ok(api.patch(name, &params, &Patch::Apply(resource)).await?)
 }
@@ -113,7 +113,7 @@ where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
-    let name = resource.metadata().name.as_deref().unwrap_or("[unnamed]");
+    let name = resource.meta().name.as_deref().unwrap_or("[unnamed]");
     let kind = T::kind(&());
 
     match scope.namespace() {
