@@ -37,11 +37,58 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 
 ### Controller framework
 - **`Reconciler` trait** — implement `reconcile` for your CRD; `error_policy` defaults to requeue after 30 s
-- **`ControllerBuilder`** — one fluent builder that wires the reconcile loop and the following operational concerns:
-  - **Health probes** — `.health_port(port)` starts `GET /healthz` + `GET /readyz` (readiness gates on first reconcile)
-  - **Graceful shutdown** — `.graceful_shutdown()` stops the loop cleanly on SIGTERM or Ctrl+C
-  - **Leader election** — `.leader_election(ns, name)` acquires and renews a Kubernetes `Lease`; only one replica reconciles at a time
-  - **Reconcile timeout** — `.reconcile_timeout(dur)` kills and requeues stuck reconciles
+- **`ControllerBuilder`** — one fluent builder that wires the reconcile loop; all methods are optional and composable:
+
+| Method | What it provides |
+|--------|-----------------|
+| `.health_port(port)` | `GET /healthz` (liveness) + `GET /readyz` (readiness) HTTP server |
+| `.graceful_shutdown()` | Clean stop on SIGTERM or Ctrl+C |
+| `.leader_election(ns, name)` | Kubernetes Lease-based HA — only one replica reconciles at a time |
+| `.leader_election_timings(dur, renew, retry)` | Override lease duration, renew period, and retry period (call after `.leader_election()`) |
+| `.reconcile_timeout(dur)` | Cancel and requeue reconciles that exceed the duration |
+| `.concurrency(n)` | Cap concurrent reconciles across all objects (default: unbounded; a single object is never reconciled concurrently regardless) |
+| `.watch(api, config, mapper)` | Trigger re-queues from a secondary resource via a mapper function; calls compose |
+| `.owns(api, config)` | Trigger re-queues from a child resource via Kubernetes owner references |
+| `.with_watches(fn)` | Raw `kube_runtime::Controller` access for advanced watch configuration |
+| `.label_selector(selector)` | Filter the primary resource watch by label |
+| `.watcher_config(config)` | Replace the default watcher configuration for the primary watch |
+
+```rust
+use std::time::Duration;
+use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::core::v1::ConfigMap;
+use kube::{Api, Client};
+use koprs::controller::{Context, ControllerBuilder, watcher};
+use koprs::owners::owner_label_mapper;
+
+let client = Client::try_default().await?;
+let ctx = Context::new(client.clone());
+
+ControllerBuilder::new(Api::<MyCR>::all(client.clone()))
+    // re-queue the CR whenever a managed Deployment changes (owner reference)
+    .owns(
+        Api::<Deployment>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    // re-queue the CR whenever a managed ConfigMap carrying the owner label changes
+    .watch(
+        Api::<ConfigMap>::all(client.clone()),
+        watcher::Config::default().labels("app.kubernetes.io/managed-by=my-operator"),
+        owner_label_mapper("my-operator/owner"),
+    )
+    .health_port(8080)
+    .graceful_shutdown()
+    .leader_election("my-namespace", "my-operator-leader")
+    .leader_election_timings(
+        Duration::from_secs(15), // lease duration
+        Duration::from_secs(5),  // renew period
+        Duration::from_secs(2),  // retry period
+    )
+    .reconcile_timeout(Duration::from_secs(120))
+    .concurrency(4)              // at most 4 objects reconciled simultaneously
+    .run(MyReconciler, ctx)
+    .await?;
+```
 
 ### Resource operations
 - **Apply & delete** — cluster-scoped and namespaced resources via Server-Side Apply (SSA)
