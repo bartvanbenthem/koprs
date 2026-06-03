@@ -9,8 +9,8 @@ mod gc_tests {
     use serde_json::json;
     use tower_test::mock;
 
-    use crate::gc::{gc_cluster_resources, gc_namespaced_resources, gc_resources};
-    use crate::scope::Namespaced;
+    use crate::gc::gc_resources;
+    use crate::scope::{Cluster, Namespaced};
 
     // -----------------------------------------------------------------------
     // Harness
@@ -435,7 +435,7 @@ mod gc_tests {
             send.send_response(json_response(node_json("orphan-node")));
         });
 
-        gc_cluster_resources::<Node>(client, "app=op", |_| false)
+        gc_resources::<Node, _>(client, Cluster, "app=op", |_| false)
             .await
             .unwrap();
 
@@ -452,7 +452,7 @@ mod gc_tests {
             // No further requests — the single desired node is skipped.
         });
 
-        gc_cluster_resources::<Node>(client, "app=op", |_| true)
+        gc_resources::<Node, _>(client, Cluster, "app=op", |_| true)
             .await
             .unwrap();
 
@@ -491,7 +491,7 @@ mod gc_tests {
             send.send_response(json_response(configmap_json("orphan", "prod")));
         });
 
-        gc_namespaced_resources::<ConfigMap>(client, "prod", "app=op", |_| false)
+        gc_resources::<ConfigMap, _>(client, Namespaced("prod"), "app=op", |_| false)
             .await
             .unwrap();
 

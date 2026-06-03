@@ -4,8 +4,8 @@ use serde_json::json;
 use tracing::info;
 
 use crate::error::Result;
-use crate::scope::{ApiScope, Cluster, Namespaced};
-use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
+use crate::scope::ApiScope;
+use crate::traits::KubeResource;
 
 // ---------------------------------------------------------------------------
 // Private core helper
@@ -84,11 +84,9 @@ where
 /// for which `is_desired` returns `false`. Resources already in termination
 /// are unblocked by clearing their finalizers.
 ///
-/// This generic form accepts any scope and a predicate so it can express both
-/// the cluster case (`name not in set`) and the namespaced case
-/// (`(namespace, name) not in set`) uniformly. Prefer
-/// [`gc_cluster_resources`] or [`gc_namespaced_resources`] when the scope and
-/// desired-set type are known at compile time.
+/// Accepts any scope and a predicate: pass
+/// [`Cluster`][crate::scope::Cluster] for cluster-scoped resources or
+/// [`Namespaced`][crate::scope::Namespaced] for namespaced ones.
 ///
 /// # Examples
 ///
@@ -139,106 +137,4 @@ where
         is_desired,
     )
     .await
-}
-
-// ---------------------------------------------------------------------------
-// Convenience wrappers — cluster-scoped
-// ---------------------------------------------------------------------------
-
-/// Garbage collect orphaned **cluster-scoped** resources.
-///
-/// Delegates to the shared GC loop with `Api::all` and a name-based predicate.
-/// Any resource whose name is not in `desired_names` is deleted. Resources
-/// already in termination are unblocked by clearing their finalizers.
-///
-/// The resource type `T` must implement [`ClusterResource`], which the
-/// compiler enforces — passing a namespace-scoped type is a compile error.
-///
-/// Prefer this over [`gc_resources`] when the scope and desired-set type are
-/// known at compile time.
-///
-/// # Examples
-///
-/// ```no_run
-/// use std::collections::HashSet;
-/// use koprs::error::KubeGenericError;
-/// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::api::core::v1::PersistentVolume;
-///
-/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
-/// let desired = HashSet::from(["pv-a".to_string(), "pv-b".to_string()]);
-/// koprs::gc::gc_cluster_resources::<PersistentVolume>(
-///     client,
-///     "app=my-operator",
-///     |pv| desired.contains(pv.meta().name.as_deref().unwrap_or("")),
-/// ).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn gc_cluster_resources<T>(
-    client: Client,
-    label_selector: &str,
-    is_desired: impl Fn(&T) -> bool,
-) -> Result<()>
-where
-    T: ClusterResource,
-{
-    gc_resources::<T, _>(client, Cluster, label_selector, is_desired).await
-}
-
-// ---------------------------------------------------------------------------
-// Convenience wrappers — namespaced
-// ---------------------------------------------------------------------------
-
-/// Garbage collect orphaned **namespace-scoped** resources across all namespaces.
-///
-/// Delegates to the shared GC loop with `Api::namespaced` per resource and a
-/// `(namespace, name)` predicate. Any resource whose pair is not in
-/// `desired_resources` is deleted. Resources already in termination are
-/// unblocked by clearing their finalizers.
-///
-/// The resource type `T` must implement [`NamespacedResource`], which the
-/// compiler enforces — passing a cluster-scoped type is a compile error.
-///
-/// Prefer this over [`gc_resources`] when the scope and desired-set type are
-/// known at compile time.
-///
-/// # Examples
-///
-/// ```no_run
-/// use std::collections::HashSet;
-/// use koprs::error::KubeGenericError;
-/// use kube::Client;
-/// use kube::Resource;
-/// use k8s_openapi::api::core::v1::PersistentVolumeClaim;
-///
-/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
-/// let desired = HashSet::from([
-///     ("default".to_string(), "pvc-a".to_string()),
-/// ]);
-/// koprs::gc::gc_namespaced_resources::<PersistentVolumeClaim>(
-///     client,
-///     "default",
-///     "app=my-operator",
-///     |pvc| {
-///         let meta = pvc.meta();
-///         let ns = meta.namespace.as_deref().unwrap_or("");
-///         let name = meta.name.as_deref().unwrap_or("");
-///         desired.contains(&(ns.to_string(), name.to_string()))
-///     },
-/// ).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn gc_namespaced_resources<T>(
-    client: Client,
-    namespace: &str,
-    label_selector: &str,
-    is_desired: impl Fn(&T) -> bool,
-) -> Result<()>
-where
-    T: NamespacedResource,
-{
-    gc_resources::<T, _>(client, Namespaced(namespace), label_selector, is_desired).await
 }

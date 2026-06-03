@@ -31,9 +31,7 @@ mod watcher_tests {
     use tower_test::mock;
 
     use crate::scope::{Cluster, Namespaced};
-    use crate::watcher::{
-        watch, watch_cluster, watch_cluster_by_label, watch_namespaced, watch_namespaced_by_label,
-    };
+    use crate::watcher::{WatchEvent, watch, watch_events, watch_objects};
 
     // -----------------------------------------------------------------------
     // Harness
@@ -427,7 +425,7 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![]));
         });
 
-        watch_namespaced::<ConfigMap>(client, "prod", tx)
+        watch::<ConfigMap, _>(client, Namespaced("prod"), None, tx)
             .await
             .unwrap();
 
@@ -449,7 +447,7 @@ mod watcher_tests {
             ))]));
         });
 
-        watch_namespaced::<ConfigMap>(client, "prod", tx)
+        watch::<ConfigMap, _>(client, Namespaced("prod"), None, tx)
             .await
             .unwrap();
 
@@ -482,7 +480,7 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![]));
         });
 
-        watch_namespaced_by_label::<ConfigMap>(client, "ns1", "app=my-op", tx)
+        watch::<ConfigMap, _>(client, Namespaced("ns1"), Some("app=my-op"), tx)
             .await
             .unwrap();
 
@@ -509,7 +507,7 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![]));
         });
 
-        watch_cluster::<Node>(client, tx).await.unwrap();
+        watch::<Node, _>(client, Cluster, None, tx).await.unwrap();
 
         server.await.unwrap();
     }
@@ -527,7 +525,7 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![added_event(node_json("n1"))]));
         });
 
-        watch_cluster::<Node>(client, tx).await.unwrap();
+        watch::<Node, _>(client, Cluster, None, tx).await.unwrap();
 
         expect_signal(&mut rx).await;
     }
@@ -552,10 +550,272 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![]));
         });
 
-        watch_cluster_by_label::<Node>(client, "app=my-op", tx)
+        watch::<Node, _>(client, Cluster, Some("app=my-op"), tx)
             .await
             .unwrap();
 
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // watch_objects — sends the resource T on ADDED/MODIFIED
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn watch_objects_sends_resource_on_applied_event() {
+        let (client, mut handle) = mock_client();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        tokio::spawn(async move {
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(list_response("ConfigMapList", vec![]));
+
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(watch_events_response(vec![added_event(configmap_json(
+                "cm-data", "ns1",
+            ))]));
+        });
+
+        watch_objects::<ConfigMap, _>(client, Namespaced("ns1"), None, tx)
+            .await
+            .unwrap();
+
+        let received = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for resource")
+            .expect("channel closed");
+
+        // The actual resource is delivered — not just a unit signal.
+        assert_eq!(
+            received.metadata.name.as_deref(),
+            Some("cm-data"),
+            "received resource name should match the watch event"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_objects_scopes_to_correct_namespace() {
+        let (client, mut handle) = mock_client();
+        let (tx, _rx) = mpsc::channel(16);
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(
+                uri.contains("/namespaces/staging/configmaps"),
+                "expected staging namespace in list uri, got: {uri}"
+            );
+            send.send_response(list_response("ConfigMapList", vec![]));
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(watch_events_response(vec![]));
+        });
+
+        watch_objects::<ConfigMap, _>(client, Namespaced("staging"), None, tx)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watch_objects_cluster_scope_uses_all_api() {
+        let (client, mut handle) = mock_client();
+        let (tx, _rx) = mpsc::channel(16);
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(
+                !uri.contains("namespaces"),
+                "cluster scope must not have namespace segment, got: {uri}"
+            );
+            assert!(uri.contains("/api/v1/nodes"), "uri={uri}");
+            send.send_response(list_response("NodeList", vec![]));
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(watch_events_response(vec![]));
+        });
+
+        watch_objects::<Node, _>(client, Cluster, None, tx)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watch_objects_forwards_label_selector() {
+        let (client, mut handle) = mock_client();
+        let (tx, _rx) = mpsc::channel(16);
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(
+                uri.contains("labelSelector=app%3Dmy-op")
+                    || uri.contains("labelSelector=app=my-op"),
+                "expected labelSelector in uri, got: {uri}"
+            );
+            send.send_response(list_response("ConfigMapList", vec![]));
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(watch_events_response(vec![]));
+        });
+
+        watch_objects::<ConfigMap, _>(client, Namespaced("ns1"), Some("app=my-op"), tx)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // watch_events — sends WatchEvent<T> for applied and deleted events
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn watch_events_sends_applied_on_added_event() {
+        let (client, mut handle) = mock_client();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        tokio::spawn(async move {
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(list_response("ConfigMapList", vec![]));
+
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(watch_events_response(vec![added_event(configmap_json(
+                "cm-added", "ns1",
+            ))]));
+        });
+
+        watch_events::<ConfigMap, _>(client, Namespaced("ns1"), None, tx)
+            .await
+            .unwrap();
+
+        let event = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+
+        assert!(
+            matches!(event, WatchEvent::Applied(_)),
+            "expected WatchEvent::Applied for an ADDED watch event"
+        );
+        if let WatchEvent::Applied(r) = event {
+            assert_eq!(r.metadata.name.as_deref(), Some("cm-added"));
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_events_sends_deleted_on_deleted_event() {
+        let (client, mut handle) = mock_client();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        tokio::spawn(async move {
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(list_response("ConfigMapList", vec![]));
+
+            let (_req, send) = handle.next_request().await.unwrap();
+            // A DELETED watch event creates Event::Delete in kube-runtime.
+            let deleted_event =
+                json!({ "type": "DELETED", "object": configmap_json("cm-gone", "ns1") });
+            send.send_response(watch_events_response(vec![deleted_event]));
+        });
+
+        watch_events::<ConfigMap, _>(client, Namespaced("ns1"), None, tx)
+            .await
+            .unwrap();
+
+        let event = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+
+        assert!(
+            matches!(event, WatchEvent::Deleted(_)),
+            "expected WatchEvent::Deleted for a DELETED watch event"
+        );
+        if let WatchEvent::Deleted(r) = event {
+            assert_eq!(r.metadata.name.as_deref(), Some("cm-gone"));
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_events_sends_applied_for_items_in_initial_list() {
+        // Objects returned during the initial LIST phase become InitApply events
+        // in kube-runtime. watch_events must convert them to WatchEvent::Applied.
+        let (client, mut handle) = mock_client();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        tokio::spawn(async move {
+            // LIST response carries one existing object.
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(list_response(
+                "ConfigMapList",
+                vec![configmap_json("pre-existing", "ns1")],
+            ));
+            // WATCH — empty, nothing new.
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(watch_events_response(vec![]));
+        });
+
+        watch_events::<ConfigMap, _>(client, Namespaced("ns1"), None, tx)
+            .await
+            .unwrap();
+
+        let event = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out")
+            .expect("channel closed");
+
+        assert!(
+            matches!(event, WatchEvent::Applied(_)),
+            "InitApply events from the LIST phase must become WatchEvent::Applied"
+        );
+        if let WatchEvent::Applied(r) = event {
+            assert_eq!(r.metadata.name.as_deref(), Some("pre-existing"));
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_events_scopes_to_correct_namespace() {
+        let (client, mut handle) = mock_client();
+        let (tx, _rx) = mpsc::channel(16);
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(
+                uri.contains("/namespaces/prod/configmaps"),
+                "expected prod namespace in uri, got: {uri}"
+            );
+            send.send_response(list_response("ConfigMapList", vec![]));
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(watch_events_response(vec![]));
+        });
+
+        watch_events::<ConfigMap, _>(client, Namespaced("prod"), None, tx)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watch_events_forwards_label_selector() {
+        let (client, mut handle) = mock_client();
+        let (tx, _rx) = mpsc::channel(16);
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(
+                uri.contains("labelSelector=app%3Dmy-op")
+                    || uri.contains("labelSelector=app=my-op"),
+                "expected labelSelector in uri, got: {uri}"
+            );
+            send.send_response(list_response("ConfigMapList", vec![]));
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(watch_events_response(vec![]));
+        });
+
+        watch_events::<ConfigMap, _>(client, Namespaced("ns1"), Some("app=my-op"), tx)
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 

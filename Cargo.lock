@@ -180,11 +180,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "futures-util",
  "k8s-openapi",
  "koprs",
  "kube",
- "kube-runtime",
  "schemars",
  "serde",
  "serde_json",
@@ -677,6 +675,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -863,13 +862,17 @@ dependencies = [
 name = "koprs"
 version = "0.7.0"
 dependencies = [
+ "bytes",
  "chrono",
  "futures",
  "http",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "k8s-openapi",
  "kube",
  "kube-runtime",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

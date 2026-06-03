@@ -176,6 +176,122 @@ mod owners_tests {
     }
 
     // -----------------------------------------------------------------------
+    // owner_label_mapper — pure function, no mock needed
+    // -----------------------------------------------------------------------
+
+    fn cm_with_owner_label(name: &str, namespace: &str, label_key: &str, owner: &str) -> ConfigMap {
+        serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "resourceVersion": "1",
+                "labels": { label_key: owner }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn owner_label_mapper_returns_object_ref_with_correct_name_and_namespace() {
+        let mapper = owner_label_mapper::<ConfigMap, ConfigMap>("my-op/owner");
+        let cm = cm_with_owner_label("my-cm", "my-ns", "my-op/owner", "my-cr");
+        let result = mapper(cm);
+        assert!(
+            result.is_some(),
+            "expected Some when label and namespace are present"
+        );
+        let obj_ref = result.unwrap();
+        assert_eq!(
+            obj_ref.name, "my-cr",
+            "ObjectRef name should be the label value"
+        );
+        assert_eq!(
+            obj_ref.namespace.as_deref(),
+            Some("my-ns"),
+            "ObjectRef namespace should match trigger resource namespace"
+        );
+    }
+
+    #[test]
+    fn owner_label_mapper_returns_none_when_label_absent() {
+        let mapper = owner_label_mapper::<ConfigMap, ConfigMap>("my-op/owner");
+        let cm: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": { "name": "cm", "namespace": "ns", "resourceVersion": "1" }
+        }))
+        .unwrap();
+        assert!(
+            mapper(cm).is_none(),
+            "expected None when owner label is absent"
+        );
+    }
+
+    #[test]
+    fn owner_label_mapper_returns_none_when_label_value_is_empty() {
+        let mapper = owner_label_mapper::<ConfigMap, ConfigMap>("my-op/owner");
+        // Label is present but its value is an empty string.
+        let cm = cm_with_owner_label("cm", "ns", "my-op/owner", "");
+        assert!(
+            mapper(cm).is_none(),
+            "expected None when owner label value is empty"
+        );
+    }
+
+    #[test]
+    fn owner_label_mapper_returns_none_when_namespace_is_absent() {
+        use k8s_openapi::api::core::v1::Node;
+        // Node is cluster-scoped — no namespace in metadata.
+        let mapper = owner_label_mapper::<Node, ConfigMap>("my-op/owner");
+        let node: Node = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Node",
+            "metadata": {
+                "name": "my-node",
+                "resourceVersion": "1",
+                "labels": { "my-op/owner": "my-cr" }
+            }
+        }))
+        .unwrap();
+        assert!(
+            mapper(node).is_none(),
+            "expected None for cluster-scoped trigger with no namespace"
+        );
+    }
+
+    #[test]
+    fn owner_label_mapper_uses_trigger_namespace_as_cr_namespace() {
+        // The CR lives in the same namespace as the trigger resource.
+        let mapper = owner_label_mapper::<ConfigMap, ConfigMap>("koprs/owner");
+        let cm = cm_with_owner_label("cm", "staging", "koprs/owner", "my-cr");
+        let obj_ref = mapper(cm).unwrap();
+        assert_eq!(obj_ref.namespace.as_deref(), Some("staging"));
+    }
+
+    #[test]
+    fn owner_label_mapper_ignores_unrelated_labels() {
+        // The matching label key is not present; other labels must not be used.
+        let mapper = owner_label_mapper::<ConfigMap, ConfigMap>("my-op/owner");
+        let cm: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": "cm",
+                "namespace": "ns",
+                "resourceVersion": "1",
+                "labels": { "some-other-label": "some-value" }
+            }
+        }))
+        .unwrap();
+        assert!(
+            mapper(cm).is_none(),
+            "expected None — wrong label key present"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // make_object_refs / make_object_refs_namespaced / make_object_refs_cluster
     // -----------------------------------------------------------------------
 
@@ -237,10 +353,7 @@ mod owners_tests {
         })
     }
 
-    use crate::owners::{
-        make_object_ref_mapper, make_object_refs, make_object_refs_cluster,
-        make_object_refs_namespaced,
-    };
+    use crate::owners::{make_object_ref_mapper, make_object_refs, owner_label_mapper};
     use crate::scope::{Cluster, Namespaced};
 
     #[tokio::test]
@@ -257,7 +370,7 @@ mod owners_tests {
             send.send_response(json_response(configmap_list(&["cm1", "cm2"], "my-ns")));
         });
 
-        let refs = make_object_refs_namespaced::<ConfigMap>(client, "my-ns")
+        let refs = make_object_refs::<ConfigMap, _>(client, Namespaced("my-ns"))
             .await
             .unwrap();
         assert_eq!(refs.len(), 2);
@@ -277,7 +390,7 @@ mod owners_tests {
         });
 
         use k8s_openapi::api::core::v1::Node;
-        let refs = make_object_refs_cluster::<Node>(client).await.unwrap();
+        let refs = make_object_refs::<Node, _>(client, Cluster).await.unwrap();
         assert_eq!(refs.len(), 3);
         server.await.unwrap();
     }

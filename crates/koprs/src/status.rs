@@ -1,14 +1,90 @@
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::info;
 
 use crate::error::Result;
 use crate::scope::{ApiScope, Cluster, Namespaced};
 use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
+
+// ---------------------------------------------------------------------------
+// KoprsCondition
+// ---------------------------------------------------------------------------
+
+/// A [`JsonSchema`]-compatible condition for use in CRD status fields.
+///
+/// Mirrors the shape of `k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition`
+/// but derives [`JsonSchema`] so it can appear directly in `CustomResource`-derived
+/// status types without defining a local mirror type.
+///
+/// `last_transition_time` is stored as an RFC 3339 string, which is what
+/// Kubernetes tooling expects and what `make_condition` / `From<Condition>`
+/// produce automatically.
+///
+/// # Examples
+///
+/// ```
+/// use koprs::status::{KoprsCondition, make_condition};
+///
+/// let c: KoprsCondition = make_condition("Ready", "True", "Synced", "All good", None);
+/// assert_eq!(c.type_, "Ready");
+/// assert_eq!(c.status, "True");
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct KoprsCondition {
+    /// The condition type, e.g. `"Ready"`.
+    #[serde(rename = "type")]
+    pub type_: String,
+    /// `"True"`, `"False"`, or `"Unknown"`.
+    pub status: String,
+    /// Machine-readable reason token, e.g. `"ConfigMapSynced"`.
+    pub reason: String,
+    /// Human-readable description of the condition.
+    pub message: String,
+    /// RFC 3339 timestamp of the last status transition.
+    pub last_transition_time: String,
+    /// Generation of the CR observed when this condition was set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+}
+
+impl From<Condition> for KoprsCondition {
+    fn from(c: Condition) -> Self {
+        KoprsCondition {
+            type_: c.type_,
+            status: c.status,
+            reason: c.reason,
+            message: c.message,
+            last_transition_time: c
+                .last_transition_time
+                .0
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+            observed_generation: c.observed_generation,
+        }
+    }
+}
+
+impl From<KoprsCondition> for Condition {
+    fn from(kc: KoprsCondition) -> Self {
+        Condition {
+            type_: kc.type_,
+            status: kc.status,
+            reason: kc.reason,
+            message: kc.message,
+            last_transition_time: Time(
+                chrono::DateTime::parse_from_rfc3339(&kc.last_transition_time)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            ),
+            observed_generation: kc.observed_generation,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Private core helper
@@ -217,7 +293,7 @@ where
 // Condition helpers — pure
 // ---------------------------------------------------------------------------
 
-/// Build a [`Condition`] with `lastTransitionTime` set to now.
+/// Build a [`KoprsCondition`] with `lastTransitionTime` set to now.
 ///
 /// Use [`upsert_condition`] to merge it into an existing conditions `Vec`
 /// before calling [`patch_status`].
@@ -237,14 +313,14 @@ pub fn make_condition(
     reason: impl Into<String>,
     message: impl Into<String>,
     observed_generation: Option<i64>,
-) -> Condition {
-    Condition {
+) -> KoprsCondition {
+    KoprsCondition {
         type_: type_.into(),
         status: status.into(),
         reason: reason.into(),
         message: message.into(),
         observed_generation,
-        last_transition_time: Time(Utc::now()),
+        last_transition_time: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
     }
 }
 
@@ -270,7 +346,7 @@ pub fn make_condition(
 /// assert_eq!(conditions.len(), 1);
 /// assert_eq!(conditions[0].status, "True");
 /// ```
-pub fn upsert_condition(conditions: &mut Vec<Condition>, new: Condition) {
+pub fn upsert_condition(conditions: &mut Vec<KoprsCondition>, new: KoprsCondition) {
     if let Some(existing) = conditions.iter_mut().find(|c| c.type_ == new.type_) {
         let last_transition_time = if existing.status == new.status {
             existing.last_transition_time.clone()

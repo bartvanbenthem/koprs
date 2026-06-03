@@ -9,10 +9,7 @@ mod finalizers_tests {
     use serde_json::json;
     use tower_test::mock;
 
-    use crate::finalizers::{
-        add_finalizer, add_finalizer_cluster, add_finalizer_namespaced, remove_finalizers,
-        remove_finalizers_cluster, remove_finalizers_namespaced,
-    };
+    use crate::finalizers::{add_finalizer, add_finalizer_namespaced, remove_finalizers};
     use crate::scope::{Cluster, Namespaced};
 
     // -----------------------------------------------------------------------
@@ -226,7 +223,7 @@ mod finalizers_tests {
             send.send_response(json_response(node_json("n1", &["op/fin"])));
         });
 
-        add_finalizer_cluster::<Node>(client, &n, "op/fin")
+        add_finalizer::<Node, _>(client, Cluster, &n, "op/fin")
             .await
             .unwrap();
         server.await.unwrap();
@@ -308,7 +305,7 @@ mod finalizers_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1", &[])));
         });
 
-        remove_finalizers_namespaced::<ConfigMap>(client, "ns1", "cm1")
+        remove_finalizers::<ConfigMap, _>(client, Namespaced("ns1"), "cm1")
             .await
             .unwrap();
         server.await.unwrap();
@@ -328,7 +325,7 @@ mod finalizers_tests {
             send.send_response(json_response(node_json("n1", &[])));
         });
 
-        remove_finalizers_cluster::<Node>(client, "n1")
+        remove_finalizers::<Node, _>(client, Cluster, "n1")
             .await
             .unwrap();
         server.await.unwrap();
@@ -359,6 +356,42 @@ mod finalizers_tests {
         let fins = result.metadata.finalizers.unwrap();
         assert!(fins.contains(&"existing/fin".to_string()));
         assert!(fins.contains(&"my-op/cleanup".to_string()));
+        server.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // add_finalizer — preserves existing finalizers in the patch body
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn add_finalizer_preserves_existing_finalizers_in_patch_body() {
+        let (client, mut handle) = mock_client();
+        // Resource already has one finalizer; adding a second must not drop the first.
+        let cm = configmap("cm1", "ns1", &["existing/fin"]);
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let body = read_body_json(req).await;
+            let fins = body["metadata"]["finalizers"].as_array().unwrap().clone();
+            let fin_strs: Vec<&str> = fins.iter().map(|v| v.as_str().unwrap()).collect();
+            assert!(
+                fin_strs.contains(&"existing/fin"),
+                "existing finalizer must be preserved: {fin_strs:?}"
+            );
+            assert!(
+                fin_strs.contains(&"my-op/cleanup"),
+                "new finalizer must be present: {fin_strs:?}"
+            );
+            send.send_response(json_response(configmap_json(
+                "cm1",
+                "ns1",
+                &["existing/fin", "my-op/cleanup"],
+            )));
+        });
+
+        add_finalizer_namespaced::<ConfigMap>(client, &cm, "my-op/cleanup")
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 
