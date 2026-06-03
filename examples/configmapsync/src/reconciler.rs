@@ -26,37 +26,24 @@ const FIELD_MANAGER: &str = "configmapsync-operator";
 const MANAGED_LABEL: &str = "app.kubernetes.io/managed-by=configmapsync-operator";
 
 // ---------------------------------------------------------------------------
-// Error type
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, thiserror::Error)]
-pub enum ReconcileError {
-    #[error("koprs error: {0}")]
-    Koprs(#[from] KubeGenericError),
-
-    #[error("missing field: {0}")]
-    MissingField(&'static str),
-}
-
-// ---------------------------------------------------------------------------
 // Reconciler
 // ---------------------------------------------------------------------------
 
 pub struct ConfigMapSyncReconciler;
 
 impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
-    type Error = ReconcileError;
+    type Error = KubeGenericError;
 
     async fn reconcile(
         &self,
         cr: Arc<ConfigMapSync>,
         ctx: Arc<Context>,
-    ) -> Result<Action, ReconcileError> {
+    ) -> Result<Action, KubeGenericError> {
         let client = ctx.client.clone();
         let name = cr.name_any();
         let namespace = cr
             .namespace()
-            .ok_or(ReconcileError::MissingField("namespace"))?;
+            .ok_or(KubeGenericError::MissingMetadata("namespace".into()))?;
 
         info!(cr = %name, ns = %namespace, "reconciling ConfigMapSync");
 
@@ -186,7 +173,7 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
     fn error_policy(
         &self,
         cr: Arc<ConfigMapSync>,
-        error: &ReconcileError,
+        error: &KubeGenericError,
         _ctx: Arc<Context>,
     ) -> Action {
         warn!(cr = %cr.name_any(), error = %error, "reconcile failed — retrying in 30s");

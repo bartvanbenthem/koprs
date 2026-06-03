@@ -67,9 +67,8 @@ The CRD must be fully established before Kubernetes will accept instances of it.
 Apply in two steps:
 
 ```bash
-kubectl apply -f manifests.yaml
-kubectl wait --for=condition=established crd/configmapsyncs.example.io --timeout=30s
-kubectl apply -f manifests.yaml
+kubectl apply -f manifests/crd.yaml
+kubectl apply -f manifests/example-cr.yaml
 ```
 
 The first apply installs the CRD. The `wait` ensures it is registered before the

@@ -1,0 +1,15 @@
+# deploy/example-cr.yaml
+#
+# Example ConfigMapSync CR.
+# Apply with: kubectl apply -f deploy/example-cr.yaml
+apiVersion: example.io/v1alpha1
+kind: ConfigMapSync
+metadata:
+  name: app-config
+  namespace: default
+spec:
+  targetNamespace: production
+  data:
+    LOG_LEVEL: info
+    FEATURE_FLAGS: "dark-mode,new-dashboard"
+    MAX_CONNECTIONS: "100"
