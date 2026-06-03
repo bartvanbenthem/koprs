@@ -45,6 +45,7 @@ pub mod watcher;
 
 pub use error::KubeGenericError;
 pub use traits::is_being_deleted;
+pub use watcher::WatchEvent;
 
 #[cfg(test)]
 mod tests;

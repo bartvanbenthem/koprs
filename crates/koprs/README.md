@@ -49,7 +49,7 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 - **Status patching** — patch the `/status` subresource of any CRD, cluster-scoped or namespaced
 - **Finalizers** — add and remove finalizers on cluster-scoped and namespaced resources
 - **Garbage collection** — diff-based GC for orphaned cluster and namespaced resources, with stuck-termination recovery
-- **Watchers** — watch any resource type with optional label filtering, signal-based via `mpsc`
+- **Watchers** — three levels of `mpsc`-based background watchers: `watch` (unit signal), `watch_objects` (resource data on applies), `watch_events` (full `WatchEvent<T>` including deletions). All use the same scope + optional label-selector API.
 - **Listing** — list resources across namespaces or within a namespace, with or without label selectors
 - **Ownership & controller wiring** — build `OwnerReference`s, set owner refs on children, generate `ObjectRef` sets, and create mapper closures for cross-resource reconcile triggers
 - **Status conditions** — `KoprsCondition` is a `JsonSchema`-compatible condition type that can be used directly in CRD status structs. `make_condition` builds one with the current timestamp; `upsert_condition` merges it into a `Vec<KoprsCondition>` with `lastTransitionTime` preservation. `From` impls bridge to/from the k8s-openapi `Condition` type when needed.
@@ -80,7 +80,7 @@ koprs = { path = "../koprs" }
 | `meta` | `ObjectMetaBuilder` — fluent builder for `ObjectMeta` |
 | `finalizers` | Add and remove finalizers |
 | `gc` | Garbage collect orphaned resources |
-| `watcher` | Watch resources for changes via `mpsc` signals |
+| `watcher` | `watch` (signal), `watch_objects` (resource data), `watch_events` (applied + deleted); `WatchEvent<T>` type |
 | `owners` | Owner references, child wiring, `ObjectRef` sets, and mapper closures |
 | `scope` | `Cluster` and `Namespaced` scope markers for compile-time API selection |
 | `traits` | `KubeResource`, `NamespacedResource`, `ClusterResource` trait aliases; `is_being_deleted` helper |
@@ -213,20 +213,65 @@ gc_resources::<MyClusterCR, _>(
 
 ### Watcher
 
+Three functions cover progressively richer data, all sharing the same scope + optional label-selector signature:
+
+#### Signal only — `watch`
+
+Cheapest option. Sends `()` on every ADDED or MODIFIED event. Use this to re-queue a reconcile when a child resource changes.
+
 ```rust
 use koprs::watcher::watch;
+use koprs::scope::Namespaced;
+use tokio::sync::mpsc;
+
+let (tx, mut rx) = mpsc::channel(16);
+let _handle = watch::<MyCR, _>(client.clone(), Namespaced("my-ns"), Some("app=my-operator"), tx).await?;
+
+while let Some(()) = rx.recv().await { /* re-queue work */ }
+```
+
+#### Resource data on applies — `watch_objects`
+
+Sends the full resource `T` on every ADDED or MODIFIED event. Use this to maintain a local cache without a follow-up GET. Deletions are not reported.
+
+```rust
+use koprs::watcher::watch_objects;
+use koprs::scope::Namespaced;
+use tokio::sync::mpsc;
+
+let (tx, mut rx) = mpsc::channel(16);
+let _handle = watch_objects::<MyCR, _>(client.clone(), Namespaced("my-ns"), None, tx).await?;
+
+while let Some(resource) = rx.recv().await {
+    // resource is a fully populated MyCR — no extra GET needed
+}
+```
+
+#### Full event model — `watch_events`
+
+Sends `WatchEvent<T>` for every event, including deletions. Objects observed during a watch restart arrive as `Applied` so the stream is always consistent.
+
+```rust
+use koprs::watcher::{watch_events, WatchEvent};
 use koprs::scope::{Cluster, Namespaced};
 use tokio::sync::mpsc;
 
 let (tx, mut rx) = mpsc::channel(16);
 
-// Namespaced, with label filter
-let _handle = watch::<MyCR, _>(client.clone(), Namespaced("my-ns"), Some("app=my-operator"), tx).await?;
+// Namespaced with label filter
+let _handle = watch_events::<MyCR, _>(client.clone(), Namespaced("my-ns"), Some("app=my-operator"), tx).await?;
 
 // Cluster-scoped, no filter
-let _handle = watch::<MyClusterCR, _>(client.clone(), Cluster, None, tx).await?;
+let _handle = watch_events::<MyClusterCR, _>(client.clone(), Cluster, None, tx).await?;
 
-while let Some(()) = rx.recv().await { /* resource changed */ }
+while let Some(event) = rx.recv().await {
+    match event {
+        WatchEvent::Applied(r) => { /* created or modified */ }
+        WatchEvent::Deleted(r) => { /* deleted — note: events may be missed if
+                                       the watcher was down; use finalizers for
+                                       guaranteed cleanup */ }
+    }
+}
 ```
 
 ### List and poll
