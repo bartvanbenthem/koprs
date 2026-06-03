@@ -33,6 +33,27 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 
 ---
 
+## What koprs adds over plain kube-rs
+
+Plain `kube` gives you `Api` + `Client`. `kube-runtime` gives you a raw `Controller` stream. Everything below is what koprs adds on top:
+
+| Area | koprs | plain kube / kube-runtime |
+|---|---|---|
+| **Controller bootstrap** | `ControllerBuilder` — health probes, leader election, graceful shutdown, timeouts, concurrency, secondary watches, all composable | Raw `Controller::new().run(...)` stream, no operational skeleton |
+| **Apply / ensure** | `apply_resource`, `ensure_resource` (SSA), `EnsureOutcome<T>` (Created / Updated / Unchanged) | `api.patch()` — caller builds every `PatchParams` and branches on 404 manually |
+| **Status patching** | `patch_status_namespaced` / cluster variants; `KoprsCondition` derives `JsonSchema` for direct CRD embedding | `api.patch_status()` exists; no ready-made condition type with `JsonSchema` |
+| **Finalizers** | `add_finalizer` / `remove_finalizers` — idempotent merge-patch, no-op if already present/absent | No helpers; callers patch the finalizer list themselves |
+| **Garbage collection** | `gc_resources` — list by label selector, delete orphans, clear finalizers on stuck-terminating resources | Not provided |
+| **Event recording** | `record_event` with `EventType::Normal` / `Warning` | Not provided |
+| **Owner references** | `owner_ref`, `controller_ref`, `set_owner_refs`; `make_object_ref_mapper`, `owner_label_mapper` for cross-resource reconcile triggers | `OwnerReference` struct exists; no builder or mapper helpers |
+| **Scope markers** | `Cluster` / `Namespaced` compile-time markers resolve to the right `Api` constructor | Callers choose `Api::all` vs `Api::namespaced` at every call site |
+| **Metadata builder** | Fluent `ObjectMetaBuilder` | `ObjectMeta { name: Some(...), labels: Some(BTreeMap::from([...])), ..Default::default() }` |
+| **Watcher abstraction** | `watch` (signal), `watch_objects` (resource data), `watch_events` (applied + deleted) — mpsc channels, backoff, tracing included | Raw `watcher()` stream; callers wire mpsc, backoff, and error handling themselves |
+| **Generic bounds** | `KubeResource` blanket trait collapses `Clone + Debug + Resource<DynamicType=()> + DeserializeOwned + Serialize + Send + Sync + 'static` to one name | Full bound wall on every generic function |
+| **Error type** | `KubeGenericError` unifies `kube::Error`, `serde_json::Error`, `io::Error`, and internal errors | Each operator defines its own error type |
+
+---
+
 ## Features
 
 ### Controller framework
