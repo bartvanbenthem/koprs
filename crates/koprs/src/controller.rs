@@ -505,6 +505,7 @@ where
     pub(crate) graceful_shutdown: bool,
     pub(crate) reconcile_timeout: Option<Duration>,
     pub(crate) leader_election: Option<LeaderElectionConfig>,
+    pub(crate) concurrency: Option<u16>,
     _phantom: PhantomData<T>,
 }
 
@@ -527,6 +528,7 @@ where
             graceful_shutdown: false,
             reconcile_timeout: None,
             leader_election: None,
+            concurrency: None,
             _phantom: PhantomData,
         }
     }
@@ -599,6 +601,86 @@ where
     /// Override the watcher configuration for the primary resource watch.
     pub fn watcher_config(mut self, config: watcher::Config) -> Self {
         self.watcher_config = config;
+        self
+    }
+
+    /// Limit the number of reconciles that may run concurrently.
+    ///
+    /// Defaults to `0` (unbounded). Set to a positive value to cap concurrent
+    /// reconciles across all objects. A single object is never reconciled
+    /// concurrently regardless of this setting.
+    pub fn concurrency(mut self, n: u16) -> Self {
+        self.concurrency = Some(n);
+        self
+    }
+
+    /// Override the timing parameters for leader election.
+    ///
+    /// Must be called **after** [`.leader_election()`](ControllerBuilder::leader_election).
+    ///
+    /// | Parameter | Meaning |
+    /// |-----------|---------|
+    /// | `lease_duration` | How long the lease is valid without renewal |
+    /// | `renew_period` | How often the leader renews the lease |
+    /// | `retry_period` | How often a non-leader retries acquisition |
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before `.leader_election()`.
+    pub fn leader_election_timings(
+        mut self,
+        lease_duration: Duration,
+        renew_period: Duration,
+        retry_period: Duration,
+    ) -> Self {
+        let le = self
+            .leader_election
+            .as_mut()
+            .expect("leader_election_timings must be called after leader_election");
+        le.lease_duration_secs = lease_duration.as_secs() as i32;
+        le.renew_period = renew_period;
+        le.retry_period = retry_period;
+        self
+    }
+
+    /// Watch child resources that this CR owns via Kubernetes owner references.
+    ///
+    /// Whenever a resource of type `Child` changes, `kube-runtime` traverses
+    /// its owner references to find the parent CR and re-queues it. Use this
+    /// for resources you create and set an owner reference on (e.g. Deployments,
+    /// Services, ConfigMaps managed by your operator).
+    ///
+    /// The `Child` type must carry an [`OwnerReference`] pointing back at `CR`.
+    ///
+    /// Multiple calls compose — each call adds another owned type on top of
+    /// previously registered watches.
+    ///
+    /// [`OwnerReference`]: k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use k8s_openapi::api::apps::v1::Deployment;
+    /// use k8s_openapi::api::core::v1::ConfigMap;
+    /// use koprs::controller::{ControllerBuilder, watcher};
+    ///
+    /// async fn example(api: kube::Api<ConfigMap>, deploy_api: kube::Api<Deployment>) {
+    ///     let _builder: ControllerBuilder<ConfigMap> = ControllerBuilder::new(api)
+    ///         .owns(deploy_api, watcher::Config::default());
+    /// }
+    /// ```
+    pub fn owns<Child>(mut self, api: kube::Api<Child>, config: watcher::Config) -> Self
+    where
+        Child: crate::traits::KubeResource,
+    {
+        let existing = self.configure.take();
+        self.configure = Some(Box::new(move |ctl| {
+            let ctl = ctl.owns(api, config);
+            match existing {
+                Some(f) => f(ctl),
+                None => ctl,
+            }
+        }));
         self
     }
 
@@ -729,6 +811,9 @@ where
 
         // --- Controller ---
         let mut ctl = kube_runtime::Controller::new(self.api, self.watcher_config);
+        if let Some(n) = self.concurrency {
+            ctl = ctl.with_config(kube_runtime::controller::Config::default().concurrency(n));
+        }
         if let Some(configure) = self.configure {
             ctl = configure(ctl);
         }

@@ -817,6 +817,89 @@ mod controller_tests {
             .with_watches(|ctl| ctl);
     }
 
+    #[tokio::test]
+    async fn builder_concurrency_defaults_to_none() {
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let b = ControllerBuilder::<ConfigMap>::new(api);
+        assert_eq!(b.concurrency, None);
+    }
+
+    #[tokio::test]
+    async fn builder_concurrency_stores_value() {
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let b = ControllerBuilder::<ConfigMap>::new(api).concurrency(4);
+        assert_eq!(b.concurrency, Some(4));
+    }
+
+    #[tokio::test]
+    async fn builder_concurrency_last_call_wins() {
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let b = ControllerBuilder::<ConfigMap>::new(api)
+            .concurrency(4)
+            .concurrency(8);
+        assert_eq!(b.concurrency, Some(8));
+    }
+
+    #[tokio::test]
+    async fn builder_owns_registers_configure_fn() {
+        use k8s_openapi::api::apps::v1::Deployment;
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client.clone(), "ns");
+        let deploy_api = kube::Api::<Deployment>::namespaced(client, "ns");
+        let b = ControllerBuilder::<ConfigMap>::new(api)
+            .owns(deploy_api, kube_runtime::watcher::Config::default());
+        assert!(b.configure.is_some());
+    }
+
+    #[tokio::test]
+    async fn builder_owns_composes_with_watch() {
+        use k8s_openapi::api::apps::v1::Deployment;
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client.clone(), "ns");
+        let deploy_api = kube::Api::<Deployment>::namespaced(client.clone(), "ns");
+        let trigger = kube::Api::<ConfigMap>::all(client);
+        let b = ControllerBuilder::<ConfigMap>::new(api)
+            .owns(deploy_api, kube_runtime::watcher::Config::default())
+            .watch(
+                trigger,
+                kube_runtime::watcher::Config::default(),
+                |_: ConfigMap| None::<kube_runtime::reflector::ObjectRef<ConfigMap>>,
+            );
+        assert!(b.configure.is_some());
+    }
+
+    #[tokio::test]
+    async fn builder_leader_election_timings_overrides_defaults() {
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let b = ControllerBuilder::<ConfigMap>::new(api)
+            .leader_election("ops-ns", "my-op-leader")
+            .leader_election_timings(
+                Duration::from_secs(45),
+                Duration::from_secs(10),
+                Duration::from_secs(3),
+            );
+        let le = b.leader_election.as_ref().unwrap();
+        assert_eq!(le.lease_duration_secs, 45);
+        assert_eq!(le.renew_period, Duration::from_secs(10));
+        assert_eq!(le.retry_period, Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "leader_election_timings must be called after leader_election")]
+    async fn builder_leader_election_timings_panics_when_no_leader_election() {
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let _ = ControllerBuilder::<ConfigMap>::new(api).leader_election_timings(
+            Duration::from_secs(45),
+            Duration::from_secs(10),
+            Duration::from_secs(3),
+        );
+    }
+
     // -----------------------------------------------------------------------
     // LeaderElectionConfig — default values
     // -----------------------------------------------------------------------

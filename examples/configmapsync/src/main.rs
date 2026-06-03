@@ -18,7 +18,7 @@ mod types;
 
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{Api, Client};
 use tracing::info;
 
@@ -46,7 +46,6 @@ async fn main() -> anyhow::Result<()> {
     // Secondary watched resources — both carry the same owner label convention.
     // .watch() calls compose: both watches are wired simultaneously.
     let cm_api: Api<ConfigMap> = Api::all(client.clone());
-    let secret_api: Api<Secret> = Api::all(client.clone());
 
     let ctx = Context::new(client);
 
@@ -61,16 +60,9 @@ async fn main() -> anyhow::Result<()> {
     let labels = "app.kubernetes.io/managed-by=configmapsync-operator";
 
     ControllerBuilder::new(cms_api)
-        // Watch 1: whenever a managed ConfigMap changes, re-queue the owning CR.
+        // Watch: whenever a managed ConfigMap changes, re-queue the owning CR.
         .watch(
             cm_api,
-            watcher::Config::default().labels(labels),
-            owner_label_mapper("configmapsync.example.io/owner"),
-        )
-        // Watch 2: chained — also re-queue when a managed Secret changes.
-        // Both watches use the same owner label convention.
-        .watch(
-            secret_api,
             watcher::Config::default().labels(labels),
             owner_label_mapper("configmapsync.example.io/owner"),
         )

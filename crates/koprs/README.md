@@ -1,15 +1,11 @@
 # KOPRS - Kubernetes Operators Rust
 
-A reusable, ergonomic library that streamlines Kubernetes operator development. By providing generic implementations for the most common operator patterns, it eliminates widespread boilerplate across your codebase. It integrates tightly with the `kube-rs` ecosystem to handle repetitive operational scaffolding, allowing developers to build reliable controllers with significantly less code.
+A reusable, ergonomic library that eliminates Kubernetes operator boilerplate by providing generic implementations of the most common patterns on top of `kube-rs`.
 
 
 ## Architecture Overview
 
-`koprs` is an opinionated, high-level orchestration framework built directly on top of `kube` and `kube-runtime`. While kube provides type-safe Kubernetes API bindings and kube-runtime delivers the controller primitives, koprs abstracts away the repetitive boilerplate required to build production ready controllers.
-
-It encapsulates complex infrastructure orchestration loops, robust Server-Side Apply (SSA) patterns, and automated background garbage collection/cleanup processes out of your controller's core codebase. Additionally, it streamlines state synchronization with ready to use watcher logic and provides a strongly typed error handling model that removes the friction of building custom Kubernetes error variants from scratch. Every generic operation comes out of the box with structured, built-in `tracing` instrumentation, giving you deep visibility into your controller's execution paths without additional setup.
-
-By lifting these structural requirements off your shoulders, koprs leaves you free to focus purely on your custom business logic.
+`koprs` is an opinionated, high-level orchestration framework built directly on top of `kube` and `kube-runtime`. It encapsulates SSA patterns, controller lifecycle management, garbage collection, watcher logic, and a strongly typed error model, all with built-in `tracing` instrumentation, so you can focus purely on your custom business logic.
 
 
 ```bash
@@ -33,30 +29,81 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 
 ---
 
+## What koprs adds over plain kube-rs
+
+| Area | koprs | plain kube / kube-runtime |
+|---|---|---|
+| **Controller bootstrap** | `ControllerBuilder` — health probes, leader election, graceful shutdown, timeouts, concurrency, secondary watches, all composable | Raw `Controller::new().run(...)` stream, no operational skeleton |
+| **Apply / ensure** | `apply_resource`, `ensure_resource` (SSA), `EnsureOutcome<T>` (Created / Updated / Unchanged) | `api.patch()` — caller builds every `PatchParams` and branches on 404 manually |
+| **Status patching** | `patch_status_namespaced` / cluster variants; `KoprsCondition` derives `JsonSchema` for direct CRD embedding | `api.patch_status()` exists; no ready-made condition type with `JsonSchema` |
+| **Finalizers** | `add_finalizer` / `remove_finalizers` — idempotent merge-patch, no-op if already present/absent | No helpers; callers patch the finalizer list themselves |
+| **Garbage collection** | `gc_resources` — list by label selector, delete orphans, clear finalizers on stuck-terminating resources | Not provided |
+| **Event recording** | `record_event` with `EventType::Normal` / `Warning` | Not provided |
+| **Owner references** | `owner_ref`, `controller_ref`, `set_owner_refs`; `make_object_ref_mapper`, `owner_label_mapper` for cross-resource reconcile triggers | `OwnerReference` struct exists; no builder or mapper helpers |
+| **Scope markers** | `Cluster` / `Namespaced` compile-time markers resolve to the right `Api` constructor | Callers choose `Api::all` vs `Api::namespaced` at every call site |
+| **Metadata builder** | Fluent `ObjectMetaBuilder` | `ObjectMeta { name: Some(...), labels: Some(BTreeMap::from([...])), ..Default::default() }` |
+| **Watcher abstraction** | `watch` (signal), `watch_objects` (resource data), `watch_events` (applied + deleted) — mpsc channels, backoff, tracing included | Raw `watcher()` stream; callers wire mpsc, backoff, and error handling themselves |
+| **Generic bounds** | `KubeResource` blanket trait collapses `Clone + Debug + Resource<DynamicType=()> + DeserializeOwned + Serialize + Send + Sync + 'static` to one name | Full bound wall on every generic function |
+| **Error type** | `KubeGenericError` unifies `kube::Error`, `serde_json::Error`, `io::Error`, and internal errors | Each operator defines its own error type |
+
+---
+
 ## Features
 
 ### Controller framework
 - **`Reconciler` trait** — implement `reconcile` for your CRD; `error_policy` defaults to requeue after 30 s
-- **`ControllerBuilder`** — one fluent builder that wires the reconcile loop and the following operational concerns:
-  - **Health probes** — `.health_port(port)` starts `GET /healthz` + `GET /readyz` (readiness gates on first reconcile)
-  - **Graceful shutdown** — `.graceful_shutdown()` stops the loop cleanly on SIGTERM or Ctrl+C
-  - **Leader election** — `.leader_election(ns, name)` acquires and renews a Kubernetes `Lease`; only one replica reconciles at a time
-  - **Reconcile timeout** — `.reconcile_timeout(dur)` kills and requeues stuck reconciles
+- **`ControllerBuilder`** — one fluent builder that wires the reconcile loop; all methods are optional and composable:
 
-### Resource operations
-- **Apply & delete** — cluster-scoped and namespaced resources via Server-Side Apply (SSA)
-- **Get** — fetch a single resource by name, returning `Option<T>` (`None` on 404)
-- **Status patching** — patch the `/status` subresource of any CRD, cluster-scoped or namespaced
-- **Finalizers** — add and remove finalizers on cluster-scoped and namespaced resources
-- **Garbage collection** — diff-based GC for orphaned cluster and namespaced resources, with stuck-termination recovery
-- **Watchers** — three levels of `mpsc`-based background watchers: `watch` (unit signal), `watch_objects` (resource data on applies), `watch_events` (full `WatchEvent<T>` including deletions). All use the same scope + optional label-selector API.
-- **Listing** — list resources across namespaces or within a namespace, with or without label selectors
-- **Ownership & controller wiring** — build `OwnerReference`s, set owner refs on children, generate `ObjectRef` sets. `ControllerBuilder::watch()` wires secondary watches with composable chaining; `owner_label_mapper` covers the common "re-queue CR from owner label" pattern
-- **Status conditions** — `KoprsCondition` is a `JsonSchema`-compatible condition type that can be used directly in CRD status structs. `make_condition` builds one with the current timestamp; `upsert_condition` merges it into a `Vec<KoprsCondition>` with `lastTransitionTime` preservation. `From` impls bridge to/from the k8s-openapi `Condition` type when needed.
-- **Metadata builder** — `ObjectMetaBuilder` builds an `ObjectMeta` fluently: `.name()`, `.namespace()`, `.label()`, `.labels()`, `.annotation()`, `.owner_ref()`, `.build()`
-- **Deletion guard** — `koprs::is_being_deleted(resource)` returns `true` when `deletionTimestamp` is set; use this at the top of the reconcile loop to branch into the cleanup path
-- **Patch labels / annotations** — merge labels or annotations onto any resource without replacing existing ones
-- **Typed errors** — `KubeGenericError` enum via `thiserror`, pattern-matchable by callers
+| Method | What it provides |
+|--------|-----------------|
+| `.health_port(port)` | `GET /healthz` (liveness) + `GET /readyz` (readiness) HTTP server |
+| `.graceful_shutdown()` | Clean stop on SIGTERM or Ctrl+C |
+| `.leader_election(ns, name)` | Kubernetes Lease-based HA — only one replica reconciles at a time |
+| `.leader_election_timings(dur, renew, retry)` | Override lease duration, renew period, and retry period (call after `.leader_election()`) |
+| `.reconcile_timeout(dur)` | Cancel and requeue reconciles that exceed the duration |
+| `.concurrency(n)` | Cap concurrent reconciles across all objects (default: unbounded; a single object is never reconciled concurrently regardless) |
+| `.watch(api, config, mapper)` | Trigger re-queues from a secondary resource via a mapper function; calls compose |
+| `.owns(api, config)` | Trigger re-queues from a child resource via Kubernetes owner references |
+| `.with_watches(fn)` | Raw `kube_runtime::Controller` access for advanced watch configuration |
+| `.label_selector(selector)` | Filter the primary resource watch by label |
+| `.watcher_config(config)` | Replace the default watcher configuration for the primary watch |
+
+```rust
+use std::time::Duration;
+use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::core::v1::ConfigMap;
+use kube::{Api, Client};
+use koprs::controller::{Context, ControllerBuilder, watcher};
+use koprs::owners::owner_label_mapper;
+
+let client = Client::try_default().await?;
+let ctx = Context::new(client.clone());
+
+ControllerBuilder::new(Api::<MyCR>::all(client.clone()))
+    // re-queue the CR whenever a managed Deployment changes (owner reference)
+    .owns(
+        Api::<Deployment>::all(client.clone()),
+        watcher::Config::default(),
+    )
+    // re-queue the CR whenever a managed ConfigMap carrying the owner label changes
+    .watch(
+        Api::<ConfigMap>::all(client.clone()),
+        watcher::Config::default().labels("app.kubernetes.io/managed-by=my-operator"),
+        owner_label_mapper("my-operator/owner"),
+    )
+    .health_port(8080)
+    .graceful_shutdown()
+    .leader_election("my-namespace", "my-operator-leader")
+    .leader_election_timings(
+        Duration::from_secs(15), // lease duration
+        Duration::from_secs(5),  // renew period
+        Duration::from_secs(2),  // retry period
+    )
+    .reconcile_timeout(Duration::from_secs(120))
+    .concurrency(4)              // at most 4 objects reconciled simultaneously
+    .run(MyReconciler, ctx)
+    .await?;
+```
 
 ---
 
