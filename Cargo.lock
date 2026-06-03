@@ -675,6 +675,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -861,10 +862,13 @@ dependencies = [
 name = "koprs"
 version = "0.7.0"
 dependencies = [
+ "bytes",
  "chrono",
  "futures",
  "http",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "k8s-openapi",
  "kube",
  "kube-runtime",

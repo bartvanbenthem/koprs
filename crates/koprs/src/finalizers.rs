@@ -89,7 +89,9 @@ where
         None => info!(%kind, %name, %finalizer, "Adding finalizer"),
     }
 
-    let patch = json!({ "metadata": { "finalizers": [finalizer] } });
+    let mut finalizers: Vec<String> = resource.meta().finalizers.clone().unwrap_or_default();
+    finalizers.push(finalizer.to_string());
+    let patch = json!({ "metadata": { "finalizers": finalizers } });
     apply_finalizer_patch(scope.into_api(client), name, patch).await
 }
 

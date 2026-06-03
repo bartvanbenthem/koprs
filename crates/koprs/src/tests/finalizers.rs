@@ -362,6 +362,42 @@ mod finalizers_tests {
         server.await.unwrap();
     }
 
+    // -----------------------------------------------------------------------
+    // add_finalizer — preserves existing finalizers in the patch body
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn add_finalizer_preserves_existing_finalizers_in_patch_body() {
+        let (client, mut handle) = mock_client();
+        // Resource already has one finalizer; adding a second must not drop the first.
+        let cm = configmap("cm1", "ns1", &["existing/fin"]);
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let body = read_body_json(req).await;
+            let fins = body["metadata"]["finalizers"].as_array().unwrap().clone();
+            let fin_strs: Vec<&str> = fins.iter().map(|v| v.as_str().unwrap()).collect();
+            assert!(
+                fin_strs.contains(&"existing/fin"),
+                "existing finalizer must be preserved: {fin_strs:?}"
+            );
+            assert!(
+                fin_strs.contains(&"my-op/cleanup"),
+                "new finalizer must be present: {fin_strs:?}"
+            );
+            send.send_response(json_response(configmap_json(
+                "cm1",
+                "ns1",
+                &["existing/fin", "my-op/cleanup"],
+            )));
+        });
+
+        add_finalizer_namespaced::<ConfigMap>(client, &cm, "my-op/cleanup")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn add_finalizer_propagates_server_errors() {
         let (client, mut handle) = mock_client();

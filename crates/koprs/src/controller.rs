@@ -172,35 +172,49 @@ where
 // Internal: health server
 // ---------------------------------------------------------------------------
 
-/// Serve minimal HTTP/1.1 health probes on an already-bound listener.
+/// Serve HTTP/1.1 health probes on an already-bound listener.
 ///
 /// `GET /healthz` — `200 OK` always (liveness).
 /// `GET /readyz`  — `200 OK` once `ready` flips to `true`, else `503` (readiness).
 pub(crate) async fn serve_health(listener: tokio::net::TcpListener, ready: Arc<AtomicBool>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use bytes::Bytes;
+    use http_body_util::Full;
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else {
+        let Ok((stream, _)) = listener.accept().await else {
             break;
         };
         let ready = ready.clone();
         tokio::spawn(async move {
-            let mut buf = [0u8; 256];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let req = std::str::from_utf8(&buf[..n]).unwrap_or_default();
-            let (status, body) = if req.contains("GET /readyz") {
-                if ready.load(Ordering::Acquire) {
-                    ("200 OK", "ok")
-                } else {
-                    ("503 Service Unavailable", "not ready")
+            let io = TokioIo::new(stream);
+            let svc = service_fn(move |req: Request<Incoming>| {
+                let ready = ready.clone();
+                async move {
+                    let (status, body): (StatusCode, &'static str) =
+                        if req.uri().path() == "/readyz" {
+                            if ready.load(Ordering::Acquire) {
+                                (StatusCode::OK, "ok")
+                            } else {
+                                (StatusCode::SERVICE_UNAVAILABLE, "not ready")
+                            }
+                        } else {
+                            (StatusCode::OK, "ok")
+                        };
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(status)
+                            .header("content-type", "text/plain")
+                            .body(Full::new(Bytes::from_static(body.as_bytes())))
+                            .unwrap(),
+                    )
                 }
-            } else {
-                ("200 OK", "ok")
-            };
-            let resp = format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(resp.as_bytes()).await.ok();
+            });
+            let _ = http1::Builder::new().serve_connection(io, svc).await;
         });
     }
 }

@@ -2,6 +2,7 @@
 //! Tests for koprs.
 mod controller;
 mod error;
+mod events;
 mod finalizers;
 mod gc;
 mod owners;

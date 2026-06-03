@@ -17,11 +17,9 @@ use kube::ResourceExt;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
-use kube::Resource;
-use kube::runtime::events::{Event, EventType, Recorder, Reporter};
-
 use koprs::controller::{Action, Context, Reconciler};
 use koprs::error::KubeGenericError;
+use koprs::events::{EventType, record_event};
 use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers_namespaced};
 use koprs::gc::gc_namespaced_resources;
 use koprs::resources::{
@@ -132,27 +130,16 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
                 ),
                 EnsureOutcome::Unchanged(_) => unreachable!(),
             };
-            let recorder = Recorder::new(
+            record_event(
                 client.clone(),
-                Reporter {
-                    controller: FIELD_MANAGER.into(),
-                    instance: None,
-                },
-            );
-            recorder
-                .publish(
-                    &Event {
-                        type_: EventType::Normal,
-                        reason: reason.into(),
-                        note: Some(note),
-                        action: "Sync".into(),
-                        secondary: None,
-                    },
-                    &cr.object_ref(&()),
-                )
-                .await
-                .map_err(kube::Error::from)
-                .map_err(KubeGenericError::from)?;
+                &*cr,
+                EventType::Normal,
+                "Sync",
+                reason,
+                note,
+                FIELD_MANAGER,
+            )
+            .await?;
         }
 
         // 3. Garbage-collect stale ConfigMaps previously owned by this CR.
