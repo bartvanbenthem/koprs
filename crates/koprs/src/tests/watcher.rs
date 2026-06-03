@@ -31,9 +31,7 @@ mod watcher_tests {
     use tower_test::mock;
 
     use crate::scope::{Cluster, Namespaced};
-    use crate::watcher::{
-        watch, watch_cluster, watch_cluster_by_label, watch_namespaced, watch_namespaced_by_label,
-    };
+    use crate::watcher::watch;
 
     // -----------------------------------------------------------------------
     // Harness
@@ -427,7 +425,7 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![]));
         });
 
-        watch_namespaced::<ConfigMap>(client, "prod", tx)
+        watch::<ConfigMap, _>(client, Namespaced("prod"), None, tx)
             .await
             .unwrap();
 
@@ -449,7 +447,7 @@ mod watcher_tests {
             ))]));
         });
 
-        watch_namespaced::<ConfigMap>(client, "prod", tx)
+        watch::<ConfigMap, _>(client, Namespaced("prod"), None, tx)
             .await
             .unwrap();
 
@@ -482,7 +480,7 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![]));
         });
 
-        watch_namespaced_by_label::<ConfigMap>(client, "ns1", "app=my-op", tx)
+        watch::<ConfigMap, _>(client, Namespaced("ns1"), Some("app=my-op"), tx)
             .await
             .unwrap();
 
@@ -509,7 +507,7 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![]));
         });
 
-        watch_cluster::<Node>(client, tx).await.unwrap();
+        watch::<Node, _>(client, Cluster, None, tx).await.unwrap();
 
         server.await.unwrap();
     }
@@ -527,7 +525,7 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![added_event(node_json("n1"))]));
         });
 
-        watch_cluster::<Node>(client, tx).await.unwrap();
+        watch::<Node, _>(client, Cluster, None, tx).await.unwrap();
 
         expect_signal(&mut rx).await;
     }
@@ -552,7 +550,7 @@ mod watcher_tests {
             send.send_response(watch_events_response(vec![]));
         });
 
-        watch_cluster_by_label::<Node>(client, "app=my-op", tx)
+        watch::<Node, _>(client, Cluster, Some("app=my-op"), tx)
             .await
             .unwrap();
 

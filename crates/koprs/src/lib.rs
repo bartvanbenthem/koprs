@@ -15,8 +15,9 @@
 //!
 //! ```no_run
 //! use koprs::error::KubeGenericError;
+//! use koprs::resources::apply_resource;
+//! use koprs::scope::Namespaced;
 //! use kube::Client;
-//! use koprs::resources::{apply_namespaced_resource, delete_namespaced_resource};
 //! use k8s_openapi::api::apps::v1::Deployment;
 //!
 //! #[tokio::main]
@@ -24,7 +25,7 @@
 //!     let client = Client::try_default().await?;
 //!     let deployment: Deployment = todo!("build your desired state");
 //!
-//!     apply_namespaced_resource(client.clone(), "my-namespace", &deployment, "my-operator").await?;
+//!     apply_resource::<Deployment, _>(client.clone(), Namespaced("my-namespace"), &deployment, "my-operator").await?;
 //!     Ok(())
 //! }
 //! ```

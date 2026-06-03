@@ -32,20 +32,12 @@ mod resources_tests {
 
     // Pull in the functions under test.
     use crate::resources::{
-        EnsureOutcome, apply_cluster_resource, apply_namespaced_resource, apply_resource,
-        delete_cluster_resource, delete_namespaced_resource, delete_resource,
-        ensure_cluster_resource, ensure_namespace, ensure_namespaced_resource, ensure_resource,
-        exists, exists_cluster, exists_namespaced, get_cluster_resource, get_namespaced_resource,
-        get_resource, list_by_field, list_namespaced_by_field, list_namespaced_resources,
-        list_namespaced_resources_by_label, list_resource_names, list_resources,
-        list_resources_by_label, patch_annotations, patch_annotations_cluster,
-        patch_annotations_namespaced, patch_labels, patch_labels_cluster, patch_labels_namespaced,
-        remove_annotations, remove_annotations_cluster, remove_annotations_namespaced,
-        remove_labels, remove_labels_cluster, remove_labels_namespaced, wait_for_condition,
-        wait_for_condition_cluster, wait_for_condition_namespaced, wait_for_resources_cluster,
-        wait_for_resources_namespaced,
+        EnsureOutcome, apply_resource, delete_resource, ensure_namespace, ensure_resource, exists,
+        get_resource, list_resource_names, list_resources_scoped, patch_annotations, patch_labels,
+        remove_annotations, remove_labels, wait_for_condition, wait_for_resources,
     };
     use crate::scope::{Cluster, Namespaced};
+    use kube::api::ListParams;
 
     // -----------------------------------------------------------------------
     // Test harness helpers
@@ -253,7 +245,7 @@ mod resources_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
-        apply_namespaced_resource::<ConfigMap>(client, "ns1", &cm, "op")
+        apply_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op")
             .await
             .unwrap();
         server.await.unwrap();
@@ -276,7 +268,7 @@ mod resources_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        apply_cluster_resource::<Node>(client, &node, "op")
+        apply_resource::<Node, _>(client, Cluster, &node, "op")
             .await
             .unwrap();
         server.await.unwrap();
@@ -358,7 +350,7 @@ mod resources_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
-        let ok = delete_namespaced_resource::<ConfigMap>(client, "ns1", "cm1")
+        let ok = delete_resource::<ConfigMap, _>(client, Namespaced("ns1"), "cm1")
             .await
             .unwrap();
         assert!(ok);
@@ -378,7 +370,9 @@ mod resources_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        let ok = delete_cluster_resource::<Node>(client, "n1").await.unwrap();
+        let ok = delete_resource::<Node, _>(client, Cluster, "n1")
+            .await
+            .unwrap();
         assert!(ok);
         server.await.unwrap();
     }
@@ -392,7 +386,7 @@ mod resources_tests {
             send.send_response(not_found_response());
         });
 
-        let ok = delete_cluster_resource::<Node>(client, "ghost")
+        let ok = delete_resource::<Node, _>(client, Cluster, "ghost")
             .await
             .unwrap();
         assert!(!ok);
@@ -475,7 +469,7 @@ mod resources_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
-        let result = get_namespaced_resource::<ConfigMap>(client, "ns1", "cm1")
+        let result = get_resource::<ConfigMap, _>(client, Namespaced("ns1"), "cm1")
             .await
             .unwrap();
         assert!(result.is_some());
@@ -495,7 +489,9 @@ mod resources_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        let result = get_cluster_resource::<Node>(client, "n1").await.unwrap();
+        let result = get_resource::<Node, _>(client, Cluster, "n1")
+            .await
+            .unwrap();
         assert!(result.is_some());
         server.await.unwrap();
     }
@@ -509,7 +505,9 @@ mod resources_tests {
             send.send_response(not_found_response());
         });
 
-        let result = get_cluster_resource::<Node>(client, "ghost").await.unwrap();
+        let result = get_resource::<Node, _>(client, Cluster, "ghost")
+            .await
+            .unwrap();
         assert!(result.is_none());
         server.await.unwrap();
     }
@@ -529,7 +527,9 @@ mod resources_tests {
             send.send_response(json_response(single_configmap_list("cm1", "default")));
         });
 
-        let list = list_resources::<ConfigMap>(client).await.unwrap();
+        let list = list_resources_scoped::<ConfigMap, _>(client, Cluster, Default::default())
+            .await
+            .unwrap();
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].metadata.name.as_deref(), Some("cm1"));
         server.await.unwrap();
@@ -544,7 +544,9 @@ mod resources_tests {
             send.send_response(json_response(empty_configmap_list()));
         });
 
-        let list = list_resources::<ConfigMap>(client).await.unwrap();
+        let list = list_resources_scoped::<ConfigMap, _>(client, Cluster, Default::default())
+            .await
+            .unwrap();
         assert!(list.items.is_empty());
         server.await.unwrap();
     }
@@ -572,9 +574,13 @@ mod resources_tests {
             )));
         });
 
-        let list = list_resources_by_label::<ConfigMap>(client, "app=my-op")
-            .await
-            .unwrap();
+        let list = list_resources_scoped::<ConfigMap, _>(
+            client,
+            Cluster,
+            ListParams::default().labels("app=my-op"),
+        )
+        .await
+        .unwrap();
         assert_eq!(list.items.len(), 1);
         server.await.unwrap();
     }
@@ -597,9 +603,10 @@ mod resources_tests {
             send.send_response(json_response(single_configmap_list("cm-prod", "prod")));
         });
 
-        let list = list_namespaced_resources::<ConfigMap>(client, "prod")
-            .await
-            .unwrap();
+        let list =
+            list_resources_scoped::<ConfigMap, _>(client, Namespaced("prod"), Default::default())
+                .await
+                .unwrap();
         assert_eq!(list.items[0].metadata.name.as_deref(), Some("cm-prod"));
         server.await.unwrap();
     }
@@ -624,9 +631,13 @@ mod resources_tests {
             send.send_response(json_response(single_configmap_list("cm-prod", "prod")));
         });
 
-        let list = list_namespaced_resources_by_label::<ConfigMap>(client, "prod", "app=my-op")
-            .await
-            .unwrap();
+        let list = list_resources_scoped::<ConfigMap, _>(
+            client,
+            Namespaced("prod"),
+            ListParams::default().labels("app=my-op"),
+        )
+        .await
+        .unwrap();
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].metadata.name.as_deref(), Some("cm-prod"));
         server.await.unwrap();
@@ -641,9 +652,13 @@ mod resources_tests {
             send.send_response(json_response(empty_configmap_list()));
         });
 
-        let list = list_namespaced_resources_by_label::<ConfigMap>(client, "prod", "app=my-op")
-            .await
-            .unwrap();
+        let list = list_resources_scoped::<ConfigMap, _>(
+            client,
+            Namespaced("prod"),
+            ListParams::default().labels("app=my-op"),
+        )
+        .await
+        .unwrap();
         assert!(list.items.is_empty());
         server.await.unwrap();
     }
@@ -710,10 +725,13 @@ mod resources_tests {
             send.send_response(json_response(single_configmap_list("cm1", "ns1")));
         });
 
-        let items =
-            wait_for_resources_namespaced::<ConfigMap>(client, "ns1", Duration::from_millis(10))
-                .await
-                .unwrap();
+        let items = wait_for_resources::<ConfigMap, _>(
+            client,
+            Namespaced("ns1"),
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap();
         assert_eq!(items.len(), 1);
         server.await.unwrap();
     }
@@ -735,7 +753,11 @@ mod resources_tests {
         // Use a tiny interval so the test is fast.
         let items = timeout(
             Duration::from_secs(5),
-            wait_for_resources_namespaced::<ConfigMap>(client, "ns1", Duration::from_millis(10)),
+            wait_for_resources::<ConfigMap, _>(
+                client,
+                Namespaced("ns1"),
+                Duration::from_millis(10),
+            ),
         )
         .await
         .expect("timed out waiting for resources")
@@ -758,7 +780,7 @@ mod resources_tests {
             send.send_response(json_response(single_node_list("node1")));
         });
 
-        let items = wait_for_resources_cluster::<Node>(client, Duration::from_millis(10))
+        let items = wait_for_resources::<Node, _>(client, Cluster, Duration::from_millis(10))
             .await
             .unwrap();
         assert_eq!(items.len(), 1);
@@ -783,7 +805,7 @@ mod resources_tests {
 
         let items = timeout(
             Duration::from_secs(5),
-            wait_for_resources_cluster::<Node>(client, Duration::from_millis(10)),
+            wait_for_resources::<Node, _>(client, Cluster, Duration::from_millis(10)),
         )
         .await
         .expect("timed out")
@@ -806,7 +828,8 @@ mod resources_tests {
             send.send_response(server_error_response());
         });
 
-        let result = list_resources::<ConfigMap>(client).await;
+        let result =
+            list_resources_scoped::<ConfigMap, _>(client, Cluster, Default::default()).await;
         assert!(result.is_err(), "expected Err, got Ok");
         server.await.unwrap();
     }
@@ -860,9 +883,9 @@ mod resources_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
-        patch_labels_namespaced::<ConfigMap>(
+        patch_labels::<ConfigMap, _>(
             client,
-            "ns1",
+            Namespaced("ns1"),
             "cm1",
             &[("app.kubernetes.io/managed-by", "my-op")],
         )
@@ -885,7 +908,7 @@ mod resources_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        patch_labels_cluster::<Node>(client, "n1", &[("env", "prod")])
+        patch_labels::<Node, _>(client, Cluster, "n1", &[("env", "prod")])
             .await
             .unwrap();
         server.await.unwrap();
@@ -930,9 +953,9 @@ mod resources_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
-        patch_annotations_namespaced::<ConfigMap>(
+        patch_annotations::<ConfigMap, _>(
             client,
-            "ns1",
+            Namespaced("ns1"),
             "cm1",
             &[("my-op/synced", "true")],
         )
@@ -955,7 +978,7 @@ mod resources_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        patch_annotations_cluster::<Node>(client, "n1", &[("my-op/version", "v1")])
+        patch_annotations::<Node, _>(client, Cluster, "n1", &[("my-op/version", "v1")])
             .await
             .unwrap();
         server.await.unwrap();
@@ -1143,7 +1166,7 @@ mod resources_tests {
             send.send_response(json_response(configmap_json_rv("cm1", "ns1", "1")));
         });
 
-        let outcome = ensure_namespaced_resource::<ConfigMap>(client, "ns1", &cm, "op")
+        let outcome = ensure_resource::<ConfigMap, _>(client, Namespaced("ns1"), &cm, "op")
             .await
             .unwrap();
         assert!(matches!(outcome, EnsureOutcome::Created(_)));
@@ -1172,7 +1195,7 @@ mod resources_tests {
             send.send_response(json_response(node_json_rv("n1", "1")));
         });
 
-        let outcome = ensure_cluster_resource::<Node>(client, &node, "op")
+        let outcome = ensure_resource::<Node, _>(client, Cluster, &node, "op")
             .await
             .unwrap();
         assert!(matches!(outcome, EnsureOutcome::Unchanged(_)));
@@ -1256,7 +1279,7 @@ mod resources_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
-        let found = exists_namespaced::<ConfigMap>(client, "ns1", "cm1")
+        let found = exists::<ConfigMap, _>(client, Namespaced("ns1"), "cm1")
             .await
             .unwrap();
         assert!(found);
@@ -1272,7 +1295,7 @@ mod resources_tests {
             send.send_response(not_found_response());
         });
 
-        let found = exists_namespaced::<ConfigMap>(client, "ns1", "missing")
+        let found = exists::<ConfigMap, _>(client, Namespaced("ns1"), "missing")
             .await
             .unwrap();
         assert!(!found);
@@ -1292,7 +1315,7 @@ mod resources_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        let found = exists_cluster::<Node>(client, "n1").await.unwrap();
+        let found = exists::<Node, _>(client, Cluster, "n1").await.unwrap();
         assert!(found);
         server.await.unwrap();
     }
@@ -1330,9 +1353,13 @@ mod resources_tests {
             send.send_response(json_response(single_node_list("n1")));
         });
 
-        let list = list_by_field::<Node>(client, "spec.nodeName=my-node")
-            .await
-            .unwrap();
+        let list = list_resources_scoped::<Node, _>(
+            client,
+            Cluster,
+            ListParams::default().fields("spec.nodeName=my-node"),
+        )
+        .await
+        .unwrap();
         assert_eq!(list.items.len(), 1);
         server.await.unwrap();
     }
@@ -1353,9 +1380,13 @@ mod resources_tests {
             send.send_response(json_response(single_configmap_list("cm1", "prod")));
         });
 
-        let list = list_namespaced_by_field::<ConfigMap>(client, "prod", "metadata.name=cm1")
-            .await
-            .unwrap();
+        let list = list_resources_scoped::<ConfigMap, _>(
+            client,
+            Namespaced("prod"),
+            ListParams::default().fields("metadata.name=cm1"),
+        )
+        .await
+        .unwrap();
         assert_eq!(list.items.len(), 1);
         assert_eq!(list.items[0].metadata.name.as_deref(), Some("cm1"));
         server.await.unwrap();
@@ -1375,9 +1406,9 @@ mod resources_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
-        let cm = wait_for_condition_namespaced::<ConfigMap, _>(
+        let cm = wait_for_condition::<ConfigMap, _, _>(
             client,
-            "ns1",
+            Namespaced("ns1"),
             "cm1",
             Duration::from_millis(10),
             |_| true,
@@ -1407,9 +1438,9 @@ mod resources_tests {
 
         let cm = timeout(
             Duration::from_secs(5),
-            wait_for_condition_namespaced::<ConfigMap, _>(
+            wait_for_condition::<ConfigMap, _, _>(
                 client,
-                "ns1",
+                Namespaced("ns1"),
                 "cm1",
                 Duration::from_millis(10),
                 |cm| {
@@ -1444,9 +1475,9 @@ mod resources_tests {
 
         let cm = timeout(
             Duration::from_secs(5),
-            wait_for_condition_namespaced::<ConfigMap, _>(
+            wait_for_condition::<ConfigMap, _, _>(
                 client,
-                "ns1",
+                Namespaced("ns1"),
                 "cm1",
                 Duration::from_millis(10),
                 |_| true,
@@ -1473,12 +1504,15 @@ mod resources_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        let node =
-            wait_for_condition_cluster::<Node, _>(client, "n1", Duration::from_millis(10), |_| {
-                true
-            })
-            .await
-            .unwrap();
+        let node = wait_for_condition::<Node, _, _>(
+            client,
+            Cluster,
+            "n1",
+            Duration::from_millis(10),
+            |_| true,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(node.metadata.name.as_deref(), Some("n1"));
         server.await.unwrap();
@@ -1532,7 +1566,7 @@ mod resources_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
-        remove_labels_namespaced::<ConfigMap>(client, "ns1", "cm1", &["stale-label"])
+        remove_labels::<ConfigMap, _>(client, Namespaced("ns1"), "cm1", &["stale-label"])
             .await
             .unwrap();
         server.await.unwrap();
@@ -1552,7 +1586,7 @@ mod resources_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        remove_labels_cluster::<Node>(client, "n1", &["env"])
+        remove_labels::<Node, _>(client, Cluster, "n1", &["env"])
             .await
             .unwrap();
         server.await.unwrap();
@@ -1601,9 +1635,14 @@ mod resources_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1")));
         });
 
-        remove_annotations_namespaced::<ConfigMap>(client, "ns1", "cm1", &["my-op/last-synced"])
-            .await
-            .unwrap();
+        remove_annotations::<ConfigMap, _>(
+            client,
+            Namespaced("ns1"),
+            "cm1",
+            &["my-op/last-synced"],
+        )
+        .await
+        .unwrap();
         server.await.unwrap();
     }
 
@@ -1621,7 +1660,7 @@ mod resources_tests {
             send.send_response(json_response(node_json("n1")));
         });
 
-        remove_annotations_cluster::<Node>(client, "n1", &["my-op/version"])
+        remove_annotations::<Node, _>(client, Cluster, "n1", &["my-op/version"])
             .await
             .unwrap();
         server.await.unwrap();

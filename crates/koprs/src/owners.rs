@@ -20,8 +20,8 @@ use kube_runtime::reflector::ObjectRef;
 use tracing::info;
 
 use crate::error::{KubeGenericError, Result};
-use crate::scope::{ApiScope, Cluster, Namespaced};
-use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
+use crate::scope::ApiScope;
+use crate::traits::KubeResource;
 
 // ---------------------------------------------------------------------------
 // Private core helpers
@@ -179,67 +179,6 @@ where
     build_object_refs(scope.into_api(client)).await
 }
 
-// ---------------------------------------------------------------------------
-// Controller wiring — convenience wrappers
-// ---------------------------------------------------------------------------
-
-/// Generate [`ObjectRef`]s for all live instances of a **namespace-scoped**
-/// resource type.
-///
-/// Delegates to [`make_object_refs`] with [`Namespaced`] as the scope.
-///
-/// See: <https://kube.rs/controllers/relations/#watched-relations>
-///
-/// # Examples
-///
-/// ```no_run
-/// use koprs::error::KubeGenericError;
-/// use kube::Client;
-/// use koprs::owners::make_object_refs_namespaced;
-/// use koprs::traits::NamespacedResource;
-///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
-/// let refs = make_object_refs_namespaced::<MyCR>(client, "my-namespace").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn make_object_refs_namespaced<T>(
-    client: Client,
-    namespace: &str,
-) -> Result<Vec<ObjectRef<T>>>
-where
-    T: NamespacedResource,
-{
-    make_object_refs::<T, _>(client, Namespaced(namespace)).await
-}
-
-/// Generate [`ObjectRef`]s for all live instances of a **cluster-scoped**
-/// resource type.
-///
-/// Delegates to [`make_object_refs`] with [`Cluster`] as the scope.
-///
-/// See: <https://kube.rs/controllers/relations/#watched-relations>
-///
-/// # Examples
-///
-/// ```no_run
-/// use koprs::error::KubeGenericError;
-/// use kube::Client;
-/// use koprs::owners::make_object_refs_cluster;
-/// use koprs::traits::ClusterResource;
-///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
-/// let refs = make_object_refs_cluster::<MyCR>(client).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn make_object_refs_cluster<T>(client: Client) -> Result<Vec<ObjectRef<T>>>
-where
-    T: ClusterResource,
-{
-    make_object_refs::<T, _>(client, Cluster).await
-}
-
 /// Build a mapper closure that returns a fixed set of [`ObjectRef`]s for any
 /// triggering resource `T`.
 ///
@@ -257,13 +196,14 @@ where
 /// ```no_run
 /// use koprs::error::KubeGenericError;
 /// use kube::Client;
-/// use koprs::owners::{make_object_refs_namespaced, make_object_ref_mapper};
+/// use koprs::owners::{make_object_refs, make_object_ref_mapper};
+/// use koprs::scope::Namespaced;
 /// use koprs::traits::NamespacedResource;
 /// use k8s_openapi::api::core::v1::ConfigMap;
 /// use std::sync::Arc;
 ///
 /// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
-/// let refs = make_object_refs_namespaced::<MyCR>(client, "my-namespace").await?;
+/// let refs = make_object_refs::<MyCR, _>(client, Namespaced("my-namespace")).await?;
 /// let mapper = make_object_ref_mapper::<ConfigMap, MyCR>(Arc::new(refs));
 /// # Ok(())
 /// # }

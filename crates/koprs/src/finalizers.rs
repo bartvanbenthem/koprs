@@ -7,8 +7,8 @@ use serde_json::json;
 use tracing::info;
 
 use crate::error::Result;
-use crate::scope::{ApiScope, Cluster, Namespaced};
-use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
+use crate::scope::{ApiScope, Namespaced};
+use crate::traits::{KubeResource, NamespacedResource};
 
 // ---------------------------------------------------------------------------
 // Private core helpers
@@ -170,96 +170,4 @@ where
         .as_deref()
         .ok_or_else(|| crate::error::KubeGenericError::MissingMetadata("namespace".into()))?;
     add_finalizer::<T, _>(client, Namespaced(namespace), resource, finalizer).await
-}
-
-/// Remove all finalizers from a **namespace-scoped** resource.
-///
-/// Delegates to [`remove_finalizers`] with [`Namespaced`] as the scope. Sets
-/// `metadata.finalizers` to `null`, unblocking deletion. The resource type
-/// `T` must implement [`NamespacedResource`].
-///
-/// # Examples
-///
-/// ```no_run
-/// use koprs::error::KubeGenericError;
-/// use kube::Client;
-/// use koprs::finalizers::remove_finalizers_namespaced;
-/// use koprs::traits::NamespacedResource;
-///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
-/// remove_finalizers_namespaced::<MyCR>(
-///     client,
-///     "my-namespace",
-///     "my-resource",
-/// ).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn remove_finalizers_namespaced<T>(
-    client: Client,
-    namespace: &str,
-    name: &str,
-) -> Result<T>
-where
-    T: NamespacedResource,
-{
-    remove_finalizers::<T, _>(client, Namespaced(namespace), name).await
-}
-
-// ---------------------------------------------------------------------------
-// Convenience wrappers — cluster-scoped
-// ---------------------------------------------------------------------------
-
-/// Add a finalizer to a **cluster-scoped** resource.
-///
-/// If the finalizer is already present, returns immediately without making an
-/// API call.
-///
-/// # Examples
-///
-/// ```no_run
-/// use koprs::error::KubeGenericError;
-/// use kube::Client;
-/// use koprs::finalizers::add_finalizer_cluster;
-/// use koprs::traits::ClusterResource;
-///
-/// # async fn example<MyCR: ClusterResource>(client: Client, resource: &MyCR) -> Result<(), KubeGenericError> {
-/// add_finalizer_cluster::<MyCR>(client, resource, "my-operator/cleanup").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn add_finalizer_cluster<T>(client: Client, resource: &T, finalizer: &str) -> Result<T>
-where
-    T: ClusterResource,
-{
-    add_finalizer::<T, _>(client, Cluster, resource, finalizer).await
-}
-
-/// Remove all finalizers from a **cluster-scoped** resource.
-///
-/// Delegates to [`remove_finalizers`] with [`Cluster`] as the scope. Sets
-/// `metadata.finalizers` to `null`, unblocking deletion. The resource type
-/// `T` must implement [`ClusterResource`].
-///
-/// # Examples
-///
-/// ```no_run
-/// use koprs::error::KubeGenericError;
-/// use kube::Client;
-/// use koprs::finalizers::remove_finalizers_cluster;
-/// use koprs::traits::ClusterResource;
-///
-/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
-/// remove_finalizers_cluster::<MyCR>(
-///     client,
-///     "my-resource",
-/// ).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn remove_finalizers_cluster<T>(client: Client, name: &str) -> Result<T>
-where
-    T: ClusterResource,
-{
-    remove_finalizers::<T, _>(client, Cluster, name).await
 }

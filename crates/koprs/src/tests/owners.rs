@@ -237,10 +237,7 @@ mod owners_tests {
         })
     }
 
-    use crate::owners::{
-        make_object_ref_mapper, make_object_refs, make_object_refs_cluster,
-        make_object_refs_namespaced,
-    };
+    use crate::owners::{make_object_ref_mapper, make_object_refs};
     use crate::scope::{Cluster, Namespaced};
 
     #[tokio::test]
@@ -257,7 +254,7 @@ mod owners_tests {
             send.send_response(json_response(configmap_list(&["cm1", "cm2"], "my-ns")));
         });
 
-        let refs = make_object_refs_namespaced::<ConfigMap>(client, "my-ns")
+        let refs = make_object_refs::<ConfigMap, _>(client, Namespaced("my-ns"))
             .await
             .unwrap();
         assert_eq!(refs.len(), 2);
@@ -277,7 +274,7 @@ mod owners_tests {
         });
 
         use k8s_openapi::api::core::v1::Node;
-        let refs = make_object_refs_cluster::<Node>(client).await.unwrap();
+        let refs = make_object_refs::<Node, _>(client, Cluster).await.unwrap();
         assert_eq!(refs.len(), 3);
         server.await.unwrap();
     }

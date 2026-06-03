@@ -26,19 +26,15 @@
 
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
 use k8s_openapi::api::rbac::v1::ClusterRole;
-use koprs::finalizers::{
-    add_finalizer_cluster, add_finalizer_namespaced, remove_finalizers_cluster,
-    remove_finalizers_namespaced,
-};
-use koprs::gc::{gc_cluster_resources, gc_namespaced_resources};
+use koprs::finalizers::{add_finalizer, add_finalizer_namespaced, remove_finalizers};
+use koprs::gc::gc_resources;
+use koprs::meta::ObjectMetaBuilder;
 use koprs::resources::{
-    apply_cluster_resource, apply_namespaced_resource, delete_cluster_resource,
-    delete_namespaced_resource, ensure_namespace, list_namespaced_resources,
-    list_resources_by_label,
+    apply_resource, delete_resource, ensure_namespace, list_resource_names, list_resources_scoped,
 };
+use koprs::scope::{Cluster, Namespaced};
 use koprs::status::{patch_status_cluster, patch_status_namespaced};
 use kube::api::ListParams;
-use kube::core::ObjectMeta;
 use kube::{Api, Client, ResourceExt};
 use serde::{Deserialize, Serialize};
 
@@ -63,40 +59,23 @@ async fn client() -> Client {
 }
 
 fn configmap(name: &str, namespace: &str, label: Option<&str>) -> ConfigMap {
-    let mut labels = std::collections::BTreeMap::new();
-    if let Some(l) = label {
-        labels.insert("koprs-test".to_string(), l.to_string());
+    let mut builder = ObjectMetaBuilder::new().name(name).namespace(namespace);
+    if let Some(val) = label {
+        builder = builder.label("koprs-test", val);
     }
     ConfigMap {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
-            labels: if labels.is_empty() {
-                None
-            } else {
-                Some(labels)
-            },
-            ..Default::default()
-        },
+        metadata: builder.build(),
         ..Default::default()
     }
 }
 
 fn cluster_role(name: &str, label: Option<&str>) -> ClusterRole {
-    let mut labels = std::collections::BTreeMap::new();
-    if let Some(l) = label {
-        labels.insert("koprs-test".to_string(), l.to_string());
+    let mut builder = ObjectMetaBuilder::new().name(name);
+    if let Some(val) = label {
+        builder = builder.label("koprs-test", val);
     }
     ClusterRole {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            labels: if labels.is_empty() {
-                None
-            } else {
-                Some(labels)
-            },
-            ..Default::default()
-        },
+        metadata: builder.build(),
         ..Default::default()
     }
 }
@@ -143,7 +122,7 @@ async fn test_ensure_namespace_creates_and_is_idempotent() {
 }
 
 // =========================================================================
-// apply_namespaced_resource / delete_namespaced_resource
+// apply_resource / delete_resource — namespaced
 // =========================================================================
 
 #[tokio::test]
@@ -154,9 +133,9 @@ async fn test_apply_and_delete_namespaced_configmap() {
     let cm = configmap(&name, ns, None);
 
     // Apply
-    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
+    apply_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &cm, "koprs-test")
         .await
-        .expect("apply_namespaced_resource failed");
+        .expect("apply_resource (namespaced) failed");
 
     // Verify exists
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
@@ -165,15 +144,15 @@ async fn test_apply_and_delete_namespaced_configmap() {
         .expect("ConfigMap not found after apply");
 
     // Delete — returns true when the resource existed
-    let deleted = delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &name)
+    let deleted = delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
         .await
-        .expect("delete_namespaced_resource failed");
+        .expect("delete_resource (namespaced) failed");
     assert!(deleted);
 
     // Delete again — returns false (404), must not error
-    let deleted_again = delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &name)
+    let deleted_again = delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
         .await
-        .expect("delete_namespaced_resource second call failed");
+        .expect("delete_resource second call failed");
     assert!(!deleted_again);
 }
 
@@ -184,22 +163,22 @@ async fn test_apply_namespaced_is_idempotent() {
     let name = uid("genops-cm-idem");
     let cm = configmap(&name, ns, None);
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
+    apply_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &cm, "koprs-test")
         .await
         .expect("first apply failed");
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
+    apply_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &cm, "koprs-test")
         .await
         .expect("second apply failed — SSA must be idempotent");
 
     // Cleanup
-    delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &name)
+    delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
         .await
         .ok();
 }
 
 // =========================================================================
-// apply_cluster_resource / delete_cluster_resource
+// apply_resource / delete_resource — cluster-scoped
 // =========================================================================
 
 #[tokio::test]
@@ -209,9 +188,9 @@ async fn test_apply_and_delete_cluster_role() {
     let cr = cluster_role(&name, None);
 
     // Apply
-    apply_cluster_resource(client.clone(), &cr, "koprs-test")
+    apply_resource::<ClusterRole, _>(client.clone(), Cluster, &cr, "koprs-test")
         .await
-        .expect("apply_cluster_resource failed");
+        .expect("apply_resource (cluster) failed");
 
     // Verify
     let api: Api<ClusterRole> = Api::all(client.clone());
@@ -220,13 +199,13 @@ async fn test_apply_and_delete_cluster_role() {
         .expect("ClusterRole not found after apply");
 
     // Delete
-    let deleted = delete_cluster_resource::<ClusterRole>(client.clone(), &name)
+    let deleted = delete_resource::<ClusterRole, _>(client.clone(), Cluster, &name)
         .await
-        .expect("delete_cluster_resource failed");
+        .expect("delete_resource (cluster) failed");
     assert!(deleted);
 
     // Delete again — 404, must not error
-    let deleted_again = delete_cluster_resource::<ClusterRole>(client.clone(), &name)
+    let deleted_again = delete_resource::<ClusterRole, _>(client.clone(), Cluster, &name)
         .await
         .expect("second delete failed unexpectedly");
     assert!(!deleted_again);
@@ -238,22 +217,22 @@ async fn test_apply_cluster_resource_is_idempotent() {
     let name = uid("genops-cr-idem");
     let cr = cluster_role(&name, None);
 
-    apply_cluster_resource(client.clone(), &cr, "koprs-test")
+    apply_resource::<ClusterRole, _>(client.clone(), Cluster, &cr, "koprs-test")
         .await
-        .expect("first apply_cluster_resource failed");
+        .expect("first apply_resource (cluster) failed");
 
-    apply_cluster_resource(client.clone(), &cr, "koprs-test")
+    apply_resource::<ClusterRole, _>(client.clone(), Cluster, &cr, "koprs-test")
         .await
-        .expect("second apply_cluster_resource failed — SSA must be idempotent");
+        .expect("second apply_resource (cluster) failed — SSA must be idempotent");
 
     // Cleanup
-    delete_cluster_resource::<ClusterRole>(client.clone(), &name)
+    delete_resource::<ClusterRole, _>(client.clone(), Cluster, &name)
         .await
         .ok();
 }
 
 // =========================================================================
-// list_resources_by_label / list_namespaced_resources
+// list_resources_scoped / list_resource_names
 // =========================================================================
 
 #[tokio::test]
@@ -263,20 +242,21 @@ async fn test_list_namespaced_resources() {
     let name = uid("genops-list");
     let cm = configmap(&name, ns, None);
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
+    apply_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &cm, "koprs-test")
         .await
         .unwrap();
 
-    let list = list_namespaced_resources::<ConfigMap>(client.clone(), ns)
-        .await
-        .expect("list_namespaced_resources failed");
+    let list =
+        list_resources_scoped::<ConfigMap, _>(client.clone(), Namespaced(ns), Default::default())
+            .await
+            .expect("list_resources_scoped (namespaced) failed");
 
     assert!(
         list.items.iter().any(|c| c.name_any() == name),
         "Created ConfigMap not found in list"
     );
 
-    delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &name)
+    delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
         .await
         .ok();
 }
@@ -289,14 +269,18 @@ async fn test_list_resources_by_label() {
     let name = uid("genops-labeled");
     let cm = configmap(&name, ns, Some(&label_value));
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
+    apply_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &cm, "koprs-test")
         .await
         .unwrap();
 
     let selector = format!("koprs-test={}", label_value);
-    let list = list_resources_by_label::<ConfigMap>(client.clone(), &selector)
-        .await
-        .expect("list_resources_by_label failed");
+    let list = list_resources_scoped::<ConfigMap, _>(
+        client.clone(),
+        Cluster,
+        ListParams::default().labels(&selector),
+    )
+    .await
+    .expect("list_resources_scoped (by label) failed");
 
     assert_eq!(
         list.items.len(),
@@ -305,7 +289,48 @@ async fn test_list_resources_by_label() {
     );
     assert_eq!(list.items[0].name_any(), name);
 
-    delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &name)
+    delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn test_list_resource_names_returns_name_set() {
+    let client = client().await;
+    let ns = "default";
+    let label_value = uid("genops-names");
+    let name_a = uid("genops-names-a");
+    let name_b = uid("genops-names-b");
+    let selector = format!("koprs-test={}", label_value);
+
+    apply_resource::<ConfigMap, _>(
+        client.clone(),
+        Namespaced(ns),
+        &configmap(&name_a, ns, Some(&label_value)),
+        "koprs-test",
+    )
+    .await
+    .unwrap();
+    apply_resource::<ConfigMap, _>(
+        client.clone(),
+        Namespaced(ns),
+        &configmap(&name_b, ns, Some(&label_value)),
+        "koprs-test",
+    )
+    .await
+    .unwrap();
+
+    let names = list_resource_names::<ConfigMap>(client.clone(), &selector)
+        .await
+        .expect("list_resource_names failed");
+
+    assert!(names.contains(&name_a));
+    assert!(names.contains(&name_b));
+
+    delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name_a)
+        .await
+        .ok();
+    delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name_b)
         .await
         .ok();
 }
@@ -321,7 +346,7 @@ async fn test_patch_status_namespaced() {
     let name = uid("genops-status");
     let cm = configmap(&name, ns, None);
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
+    apply_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &cm, "koprs-test")
         .await
         .unwrap();
 
@@ -358,7 +383,7 @@ async fn test_patch_status_namespaced() {
         Err(e) => panic!("unexpected non-API error from patch_status_namespaced: {e:?}"),
     }
 
-    delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &name)
+    delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
         .await
         .ok();
 }
@@ -373,7 +398,7 @@ async fn test_patch_status_cluster() {
     let name = uid("genops-cr-status");
     let cr = cluster_role(&name, None);
 
-    apply_cluster_resource(client.clone(), &cr, "koprs-test")
+    apply_resource::<ClusterRole, _>(client.clone(), Cluster, &cr, "koprs-test")
         .await
         .unwrap();
 
@@ -401,7 +426,7 @@ async fn test_patch_status_cluster() {
         Err(e) => panic!("unexpected non-API error from patch_status_cluster: {e:?}"),
     }
 
-    delete_cluster_resource::<ClusterRole>(client.clone(), &name)
+    delete_resource::<ClusterRole, _>(client.clone(), Cluster, &name)
         .await
         .ok();
 }
@@ -417,11 +442,11 @@ async fn test_add_and_remove_namespaced_finalizer() {
     let name = uid("genops-fin");
     let cm = configmap(&name, ns, None);
 
-    apply_namespaced_resource(client.clone(), ns, &cm, "koprs-test")
+    apply_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &cm, "koprs-test")
         .await
         .unwrap();
 
-    // Add finalizer
+    // add_finalizer_namespaced extracts the namespace from the resource
     let with_fin = add_finalizer_namespaced::<ConfigMap>(client.clone(), &cm, "koprs/finalizer")
         .await
         .expect("add_finalizer_namespaced failed");
@@ -436,10 +461,10 @@ async fn test_add_and_remove_namespaced_finalizer() {
         "Finalizer not present after add"
     );
 
-    // Remove all finalizers
-    let without_fin = remove_finalizers_namespaced::<ConfigMap>(client.clone(), ns, &name)
+    // Remove all finalizers via the generic form
+    let without_fin = remove_finalizers::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
         .await
-        .expect("remove_finalizers_namespaced failed");
+        .expect("remove_finalizers (namespaced) failed");
 
     assert!(
         without_fin
@@ -451,7 +476,7 @@ async fn test_add_and_remove_namespaced_finalizer() {
         "Finalizers still present after remove"
     );
 
-    delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &name)
+    delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
         .await
         .ok();
 }
@@ -466,14 +491,14 @@ async fn test_add_and_remove_cluster_finalizer() {
     let name = uid("genops-cfin");
     let cr = cluster_role(&name, None);
 
-    apply_cluster_resource(client.clone(), &cr, "koprs-test")
+    apply_resource::<ClusterRole, _>(client.clone(), Cluster, &cr, "koprs-test")
         .await
         .unwrap();
 
-    // Add finalizer
-    let with_fin = add_finalizer_cluster::<ClusterRole>(client.clone(), &cr, "koprs/finalizer")
+    // Generic add_finalizer with Cluster scope
+    let with_fin = add_finalizer::<ClusterRole, _>(client.clone(), Cluster, &cr, "koprs/finalizer")
         .await
-        .expect("add_finalizer_cluster failed");
+        .expect("add_finalizer (cluster) failed");
 
     assert!(
         with_fin
@@ -486,11 +511,11 @@ async fn test_add_and_remove_cluster_finalizer() {
     );
 
     // Remove all finalizers before deleting (otherwise the object gets stuck)
-    remove_finalizers_cluster::<ClusterRole>(client.clone(), &name)
+    remove_finalizers::<ClusterRole, _>(client.clone(), Cluster, &name)
         .await
-        .expect("remove_finalizers_cluster failed");
+        .expect("remove_finalizers (cluster) failed");
 
-    delete_cluster_resource::<ClusterRole>(client.clone(), &name)
+    delete_resource::<ClusterRole, _>(client.clone(), Cluster, &name)
         .await
         .ok();
 }
@@ -509,15 +534,17 @@ async fn test_gc_cluster_resources_deletes_orphans() {
     let orphan = uid("genops-gc-orphan");
 
     // Create both
-    apply_cluster_resource(
+    apply_resource::<ClusterRole, _>(
         client.clone(),
+        Cluster,
         &cluster_role(&keep, Some(&label)),
         "koprs-test",
     )
     .await
     .unwrap();
-    apply_cluster_resource(
+    apply_resource::<ClusterRole, _>(
         client.clone(),
+        Cluster,
         &cluster_role(&orphan, Some(&label)),
         "koprs-test",
     )
@@ -526,11 +553,11 @@ async fn test_gc_cluster_resources_deletes_orphans() {
 
     // GC — predicate keeps only the "keep" resource by name.
     let keep_name = keep.clone();
-    gc_cluster_resources::<ClusterRole>(client.clone(), &selector, move |r| {
+    gc_resources::<ClusterRole, _>(client.clone(), Cluster, &selector, move |r| {
         r.metadata.name.as_deref() == Some(&keep_name)
     })
     .await
-    .expect("gc_cluster_resources failed");
+    .expect("gc_resources (cluster) failed");
 
     // Verify orphan is gone, keeper remains
     let api: Api<ClusterRole> = Api::all(client.clone());
@@ -547,7 +574,7 @@ async fn test_gc_cluster_resources_deletes_orphans() {
     );
 
     // Cleanup
-    delete_cluster_resource::<ClusterRole>(client.clone(), &keep)
+    delete_resource::<ClusterRole, _>(client.clone(), Cluster, &keep)
         .await
         .ok();
 }
@@ -566,31 +593,29 @@ async fn test_gc_namespaced_resources_deletes_orphans() {
     let keep = uid("genops-gc-ns-keep");
     let orphan = uid("genops-gc-ns-orphan");
 
-    apply_namespaced_resource(
+    apply_resource::<ConfigMap, _>(
         client.clone(),
-        ns,
+        Namespaced(ns),
         &configmap(&keep, ns, Some(&label)),
         "koprs-test",
     )
     .await
     .unwrap();
-    apply_namespaced_resource(
+    apply_resource::<ConfigMap, _>(
         client.clone(),
-        ns,
+        Namespaced(ns),
         &configmap(&orphan, ns, Some(&label)),
         "koprs-test",
     )
     .await
     .unwrap();
 
-    // gc_namespaced_resources takes: client, namespace, label_selector, predicate.
-    // The predicate receives a &ConfigMap and returns true for resources to keep.
     let keep_name = keep.clone();
-    gc_namespaced_resources::<ConfigMap>(client.clone(), ns, &selector, move |r| {
+    gc_resources::<ConfigMap, _>(client.clone(), Namespaced(ns), &selector, move |r| {
         r.metadata.name.as_deref() == Some(&keep_name)
     })
     .await
-    .expect("gc_namespaced_resources failed");
+    .expect("gc_resources (namespaced) failed");
 
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
     let remaining = api
@@ -606,7 +631,7 @@ async fn test_gc_namespaced_resources_deletes_orphans() {
     );
 
     // Cleanup
-    delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &keep)
+    delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &keep)
         .await
         .ok();
 }
@@ -621,12 +646,11 @@ async fn test_gc_does_not_delete_desired_resources() {
     let ns = "default";
     let label = uid("gc-noop");
     let selector = format!("koprs-test={}", label);
-
     let name = uid("genops-gc-keep-all");
 
-    apply_namespaced_resource(
+    apply_resource::<ConfigMap, _>(
         client.clone(),
-        ns,
+        Namespaced(ns),
         &configmap(&name, ns, Some(&label)),
         "koprs-test",
     )
@@ -634,16 +658,16 @@ async fn test_gc_does_not_delete_desired_resources() {
     .unwrap();
 
     // Predicate always returns true — nothing should be deleted.
-    gc_namespaced_resources::<ConfigMap>(client.clone(), ns, &selector, |_| true)
+    gc_resources::<ConfigMap, _>(client.clone(), Namespaced(ns), &selector, |_| true)
         .await
-        .expect("gc_namespaced_resources failed");
+        .expect("gc_resources failed");
 
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
     api.get(&name)
         .await
         .expect("Resource was incorrectly deleted by GC");
 
-    delete_namespaced_resource::<ConfigMap>(client.clone(), ns, &name)
+    delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
         .await
         .ok();
 }

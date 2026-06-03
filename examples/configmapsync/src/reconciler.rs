@@ -1,12 +1,4 @@
 // src/reconciler.rs
-//
-// Core reconcile logic for the ConfigMapSync operator.
-//
-// Per reconcile loop iteration the operator:
-//   1. Checks whether the CR is being deleted (finalizer present + deletionTimestamp set).
-//   2. On deletion  → removes the synced ConfigMap, then strips the finalizer.
-//   3. On creation  → ensures the finalizer is present, applies the desired
-//                     ConfigMap in the target namespace, and patches status.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,13 +11,12 @@ use tracing::{error, info, warn};
 use koprs::controller::{Action, Context, Reconciler};
 use koprs::error::KubeGenericError;
 use koprs::events::{EventType, record_event};
-use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers_namespaced};
-use koprs::gc::gc_namespaced_resources;
+use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers};
+use koprs::gc::gc_resources;
 use koprs::is_being_deleted;
 use koprs::meta::ObjectMetaBuilder;
-use koprs::resources::{
-    EnsureOutcome, delete_namespaced_resource, ensure_namespaced_resource, patch_labels_namespaced,
-};
+use koprs::resources::{EnsureOutcome, delete_resource, ensure_resource, patch_labels};
+use koprs::scope::Namespaced;
 use koprs::status::{make_condition, patch_status_namespaced, upsert_condition};
 
 use crate::types::{ConfigMapSync, ConfigMapSyncStatus};
@@ -78,7 +69,8 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
             let target_ns = &cr.spec.target_namespace;
             let cm_name = configmap_name(&name);
 
-            match delete_namespaced_resource::<ConfigMap>(client.clone(), target_ns, &cm_name).await
+            match delete_resource::<ConfigMap, _>(client.clone(), Namespaced(target_ns), &cm_name)
+                .await
             {
                 Ok(true) => info!(cm = %cm_name, ns = %target_ns, "deleted synced ConfigMap"),
                 Ok(false) => info!(cm = %cm_name, "ConfigMap was already gone"),
@@ -88,7 +80,7 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
                 }
             }
 
-            remove_finalizers_namespaced::<ConfigMapSync>(client.clone(), &namespace, &name)
+            remove_finalizers::<ConfigMapSync, _>(client.clone(), Namespaced(&namespace), &name)
                 .await?;
             info!(cr = %name, "finalizer removed — deletion complete");
             return Ok(Action::await_change());
@@ -101,18 +93,14 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
         // 1. Ensure finalizer is present.
         add_finalizer_namespaced::<ConfigMapSync>(client.clone(), &cr, FINALIZER).await?;
 
-        // 2. Build and ensure the desired ConfigMap via koprs SSA.
-        //    ensure_namespaced_resource returns an EnsureOutcome so we can emit a
-        //    Kubernetes Event only when the ConfigMap was actually written.  Plain
-        //    SSA is already idempotent, but Kubernetes Events are append-only — we
-        //    must not publish one on every no-op reconcile.
+        // 2. Build and ensure the desired ConfigMap.
         let target_ns = &cr.spec.target_namespace;
         let cm_name = configmap_name(&name);
         let desired_cm = build_configmap(&cm_name, target_ns, &name, &cr.spec.data);
 
-        let outcome = ensure_namespaced_resource::<ConfigMap>(
+        let outcome = ensure_resource::<ConfigMap, _>(
             client.clone(),
-            target_ns,
+            Namespaced(target_ns),
             &desired_cm,
             FIELD_MANAGER,
         )
@@ -144,25 +132,21 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
         }
 
         // 3. Garbage-collect stale ConfigMaps previously owned by this CR.
-        gc_namespaced_resources::<ConfigMap>(client.clone(), target_ns, MANAGED_LABEL, |cm| {
+        gc_resources::<ConfigMap, _>(client.clone(), Namespaced(target_ns), MANAGED_LABEL, |cm| {
             cm.name_any() == cm_name
         })
         .await?;
 
-        // 4. Stamp the target namespace as a label on the CR so it is visible
-        //    without fetching the full spec.
-        patch_labels_namespaced::<ConfigMapSync>(
+        // 4. Stamp the target namespace as a label on the CR.
+        patch_labels::<ConfigMapSync, _>(
             client.clone(),
-            &namespace,
+            Namespaced(&namespace),
             &name,
             &[("configmapsync.example.io/synced-to", target_ns)],
         )
         .await?;
 
-        // 5. Write the full status in one SSA patch so a single field manager owns
-        //    all status fields. Two separate patches by the same manager would cause
-        //    each one to drop the other's fields on every reconcile, triggering an
-        //    endless watch-event loop.
+        // 5. Write the full status in one SSA patch.
         let generation = cr.metadata.generation;
         let status_message = format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'");
 

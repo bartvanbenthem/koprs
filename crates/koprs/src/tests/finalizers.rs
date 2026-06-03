@@ -9,10 +9,7 @@ mod finalizers_tests {
     use serde_json::json;
     use tower_test::mock;
 
-    use crate::finalizers::{
-        add_finalizer, add_finalizer_cluster, add_finalizer_namespaced, remove_finalizers,
-        remove_finalizers_cluster, remove_finalizers_namespaced,
-    };
+    use crate::finalizers::{add_finalizer, add_finalizer_namespaced, remove_finalizers};
     use crate::scope::{Cluster, Namespaced};
 
     // -----------------------------------------------------------------------
@@ -226,7 +223,7 @@ mod finalizers_tests {
             send.send_response(json_response(node_json("n1", &["op/fin"])));
         });
 
-        add_finalizer_cluster::<Node>(client, &n, "op/fin")
+        add_finalizer::<Node, _>(client, Cluster, &n, "op/fin")
             .await
             .unwrap();
         server.await.unwrap();
@@ -308,7 +305,7 @@ mod finalizers_tests {
             send.send_response(json_response(configmap_json("cm1", "ns1", &[])));
         });
 
-        remove_finalizers_namespaced::<ConfigMap>(client, "ns1", "cm1")
+        remove_finalizers::<ConfigMap, _>(client, Namespaced("ns1"), "cm1")
             .await
             .unwrap();
         server.await.unwrap();
@@ -328,7 +325,7 @@ mod finalizers_tests {
             send.send_response(json_response(node_json("n1", &[])));
         });
 
-        remove_finalizers_cluster::<Node>(client, "n1")
+        remove_finalizers::<Node, _>(client, Cluster, "n1")
             .await
             .unwrap();
         server.await.unwrap();

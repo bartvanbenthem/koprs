@@ -90,27 +90,36 @@ koprs = { path = "../koprs" }
 
 ## Usage
 
-Most operations come in three forms: `_namespaced` (most common), `_cluster`, and a generic scope form that accepts `Namespaced("ns")` or `Cluster`. The examples below show the namespaced form; the others follow the same signature.
+Every operation takes an explicit scope argument — either `Namespaced("ns")` for namespace-scoped resources or `Cluster` for cluster-scoped ones. The scope is passed at the call site rather than encoded in the function name, so the routing is always visible.
 
 ### Apply and delete
 
 ```rust
-use koprs::resources::{apply_namespaced_resource, delete_namespaced_resource};
+use koprs::resources::{apply_resource, delete_resource};
+use koprs::scope::{Cluster, Namespaced};
 
-apply_namespaced_resource::<MyCR>(client.clone(), "my-ns", &resource, "my-operator").await?;
+// Namespaced resource
+apply_resource::<MyCR, _>(client.clone(), Namespaced("my-ns"), &resource, "my-operator").await?;
 
 // Returns Ok(false) if the resource was already gone
-let deleted = delete_namespaced_resource::<MyCR>(client.clone(), "my-ns", "my-cr").await?;
+let deleted = delete_resource::<MyCR, _>(client.clone(), Namespaced("my-ns"), "my-cr").await?;
+
+// Cluster-scoped resource — same function, different scope marker
+let deleted = delete_resource::<MyClusterCR, _>(client.clone(), Cluster, "my-cr").await?;
 ```
 
 ### Finalizers
 
 ```rust
-use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers_namespaced};
+use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers};
+use koprs::scope::Namespaced;
 
-// No-op if the finalizer is already present — safe to call on every reconcile.
+// add_finalizer_namespaced extracts the namespace from the resource metadata —
+// no-op if the finalizer is already present, safe to call on every reconcile.
 add_finalizer_namespaced::<MyCR>(client.clone(), &cr, "my-operator/cleanup").await?;
-remove_finalizers_namespaced::<MyCR>(client.clone(), "my-ns", "my-cr").await?;
+
+// Removing finalizers uses the generic scope form — pass Cluster for cluster-scoped resources.
+remove_finalizers::<MyCR, _>(client.clone(), Namespaced("my-ns"), "my-cr").await?;
 ```
 
 ### Status
@@ -171,10 +180,12 @@ Use `is_being_deleted` at the top of the reconcile loop to branch into the clean
 
 ```rust
 use koprs::is_being_deleted;
+use koprs::finalizers::remove_finalizers;
+use koprs::scope::Namespaced;
 
 if is_being_deleted(&*cr) {
     // clean up owned resources, then remove finalizer
-    remove_finalizers_namespaced::<MyCR>(client.clone(), &namespace, &name).await?;
+    remove_finalizers::<MyCR, _>(client.clone(), Namespaced(&namespace), &name).await?;
     return Ok(Action::await_change());
 }
 ```
@@ -184,10 +195,18 @@ if is_being_deleted(&*cr) {
 Accepts a keep-predicate: any resource matching the label selector for which the predicate returns `false` is deleted.
 
 ```rust
-use koprs::gc::gc_namespaced_resources;
+use koprs::gc::gc_resources;
+use koprs::scope::{Cluster, Namespaced};
 
-gc_namespaced_resources::<ConfigMap>(
-    client.clone(), "my-ns", "app=my-operator",
+// Namespaced
+gc_resources::<ConfigMap, _>(
+    client.clone(), Namespaced("my-ns"), "app=my-operator",
+    |r| desired_names.contains(&r.name_any()),
+).await?;
+
+// Cluster-scoped — same function, Cluster scope
+gc_resources::<MyClusterCR, _>(
+    client.clone(), Cluster, "app=my-operator",
     |r| desired_names.contains(&r.name_any()),
 ).await?;
 ```
@@ -195,11 +214,17 @@ gc_namespaced_resources::<ConfigMap>(
 ### Watcher
 
 ```rust
-use koprs::watcher::watch_namespaced_by_label;
+use koprs::watcher::watch;
+use koprs::scope::{Cluster, Namespaced};
 use tokio::sync::mpsc;
 
 let (tx, mut rx) = mpsc::channel(16);
-let _handle = watch_namespaced_by_label::<MyCR>(client.clone(), "my-ns", "app=my-operator", tx).await?;
+
+// Namespaced, with label filter
+let _handle = watch::<MyCR, _>(client.clone(), Namespaced("my-ns"), Some("app=my-operator"), tx).await?;
+
+// Cluster-scoped, no filter
+let _handle = watch::<MyClusterCR, _>(client.clone(), Cluster, None, tx).await?;
 
 while let Some(()) = rx.recv().await { /* resource changed */ }
 ```
@@ -207,44 +232,56 @@ while let Some(()) = rx.recv().await { /* resource changed */ }
 ### List and poll
 
 ```rust
-use koprs::resources::{
-    list_namespaced_resources, list_namespaced_resources_by_label,
-    list_resource_names, list_resources_scoped, wait_for_resources_namespaced,
-};
-use koprs::scope::Namespaced;
+use koprs::resources::{list_resources_scoped, list_resource_names, wait_for_resources};
+use koprs::scope::{Cluster, Namespaced};
 use kube::api::ListParams;
 use std::time::Duration;
 
-// Convenience wrappers for the common cases
-let items = list_namespaced_resources::<MyCR>(client.clone(), "my-ns").await?;
-let names = list_resource_names::<MyCR>(client.clone(), "app=my-operator").await?;
-let items = wait_for_resources_namespaced::<MyCR>(client.clone(), "my-ns", Duration::from_secs(10)).await?;
+// List in a namespace with a label filter
+let items = list_resources_scoped::<MyCR, _>(
+    client.clone(),
+    Namespaced("my-ns"),
+    ListParams::default().labels("app=my-operator"),
+).await?;
 
-// Generic scoped form when you need full control over ListParams
-let params = ListParams::default().labels("app=my-operator").fields("status.phase=Running");
-let items = list_resources_scoped::<MyCR, _>(client.clone(), Namespaced("my-ns"), params).await?;
+// List across all namespaces (or cluster-scoped resources) with a field filter
+let items = list_resources_scoped::<MyCR, _>(
+    client.clone(),
+    Cluster,
+    ListParams::default().fields("status.phase=Running"),
+).await?;
+
+// Names only — useful for GC diffing
+let names = list_resource_names::<MyCR>(client.clone(), "app=my-operator").await?;
+
+// Poll until at least one resource exists
+let items = wait_for_resources::<MyCR, _>(
+    client.clone(), Namespaced("my-ns"), Duration::from_secs(10),
+).await?;
 ```
 
 ### Ownership and controller wiring
 
 ```rust
-use koprs::owners::{controller_ref, set_owner_refs, make_object_refs_namespaced, make_object_ref_mapper};
+use koprs::owners::{controller_ref, set_owner_refs, make_object_refs, make_object_ref_mapper};
+use koprs::scope::{Cluster, Namespaced};
 use std::sync::Arc;
 
 let oref = controller_ref(&parent_cr)?;
 set_owner_refs(&mut child, vec![oref]);
 
-let refs   = make_object_refs_namespaced::<MyCR>(client.clone(), "my-ns").await?;
+let refs   = make_object_refs::<MyCR, _>(client.clone(), Namespaced("my-ns")).await?;
 let mapper = make_object_ref_mapper::<TriggerType, _>(Arc::new(refs));
 ```
 
 ### Labels, annotations, and namespaces
 
 ```rust
-use koprs::resources::{patch_labels_namespaced, patch_annotations_namespaced, ensure_namespace};
+use koprs::resources::{patch_labels, patch_annotations, ensure_namespace};
+use koprs::scope::Namespaced;
 
-patch_labels_namespaced::<MyCR>(client.clone(), "my-ns", "my-cr", &[("app.kubernetes.io/managed-by", "my-operator")]).await?;
-patch_annotations_namespaced::<MyCR>(client.clone(), "my-ns", "my-cr", &[("my-operator/synced", "true")]).await?;
+patch_labels::<MyCR, _>(client.clone(), Namespaced("my-ns"), "my-cr", &[("app.kubernetes.io/managed-by", "my-operator")]).await?;
+patch_annotations::<MyCR, _>(client.clone(), Namespaced("my-ns"), "my-cr", &[("my-operator/synced", "true")]).await?;
 ensure_namespace(client.clone(), "my-ns", "my-operator").await?;
 ```
 
@@ -268,8 +305,10 @@ pub enum KubeGenericError {
 
 ```rust
 use koprs::error::KubeGenericError;
+use koprs::resources::delete_resource;
+use koprs::scope::Cluster;
 
-match delete_cluster_resource::<Namespace>(client, "my-resource").await {
+match delete_resource::<Namespace, _>(client, Cluster, "my-resource").await {
     Ok(true)  => info!("deleted"),
     Ok(false) => info!("already gone"),
     Err(KubeGenericError::Kube(kube::Error::Api(e))) if e.code == 403 => {
@@ -345,8 +384,10 @@ async fn my_test() {
         );
     });
     // Call the function under test using the mock client.
-    let result = koprs::resources::list_resources::<k8s_openapi::api::core::v1::ConfigMap>(
+    let result = koprs::resources::list_resources_scoped::<k8s_openapi::api::core::v1::ConfigMap, _>(
         client,
+        koprs::scope::Cluster,
+        Default::default(),
     )
     .await
     .unwrap();
