@@ -446,6 +446,96 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// Generic public API — exists
+// ---------------------------------------------------------------------------
+
+/// Check whether a Kubernetes resource exists.
+///
+/// Returns `Ok(true)` if the resource is found, `Ok(false)` on a 404.
+/// Does not return the resource — use [`get_resource`] if you need the value.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`exists_namespaced`] or [`exists_cluster`] for the common cases.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::exists;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// if exists::<MyCR, _>(client, Namespaced("my-namespace"), "my-cr").await? {
+///     // resource exists
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn exists<T, Scope>(client: Client, scope: Scope, name: &str) -> Result<bool>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    Ok(get_resource_inner(scope.into_api(client), name)
+        .await?
+        .is_some())
+}
+
+/// Check whether a **namespace-scoped** resource exists.
+///
+/// Delegates to [`exists`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::exists_namespaced;
+/// use koprs::traits::NamespacedResource;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// if exists_namespaced::<MyCR>(client, "my-namespace", "my-cr").await? {
+///     // resource exists
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn exists_namespaced<T>(client: Client, namespace: &str, name: &str) -> Result<bool>
+where
+    T: NamespacedResource,
+{
+    exists::<T, _>(client, Namespaced(namespace), name).await
+}
+
+/// Check whether a **cluster-scoped** resource exists.
+///
+/// Delegates to [`exists`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::exists_cluster;
+/// use koprs::traits::ClusterResource;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// if exists_cluster::<MyCR>(client, "my-cr").await? {
+///     // resource exists
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn exists_cluster<T>(client: Client, name: &str) -> Result<bool>
+where
+    T: ClusterResource,
+{
+    exists::<T, _>(client, Cluster, name).await
+}
+
+// ---------------------------------------------------------------------------
 // Generic public API — ensure
 // ---------------------------------------------------------------------------
 
@@ -694,6 +784,58 @@ where
     Ok(api.list(&lp).await?)
 }
 
+/// List all resources of type `T` matching a field selector.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use koprs::resources::list_by_field;
+///
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
+/// let pods = list_by_field::<Pod>(client, "spec.nodeName=my-node").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn list_by_field<T>(client: Client, field_selector: &str) -> Result<ObjectList<T>>
+where
+    T: KubeResource,
+{
+    let api: Api<T> = Api::all(client);
+    let lp = ListParams::default().fields(field_selector);
+    Ok(api.list(&lp).await?)
+}
+
+/// List all resources of type `T` in a specific namespace matching a field selector.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use koprs::resources::list_namespaced_by_field;
+///
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
+/// let pods = list_namespaced_by_field::<Pod>(client, "my-namespace", "status.phase=Running").await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn list_namespaced_by_field<T>(
+    client: Client,
+    namespace: &str,
+    field_selector: &str,
+) -> Result<ObjectList<T>>
+where
+    T: NamespacedResource,
+{
+    let api: Api<T> = Api::namespaced(client, namespace);
+    let lp = ListParams::default().fields(field_selector);
+    Ok(api.list(&lp).await?)
+}
+
 /// List the names of all resources of type `T` matching a label selector,
 /// returned as a `HashSet<String>`. Useful for garbage collection diffing.
 ///
@@ -857,6 +999,154 @@ where
     T: ClusterResource,
 {
     wait_for_resources::<T, _>(client, Cluster, interval).await
+}
+
+// ---------------------------------------------------------------------------
+// Polling — wait for condition
+// ---------------------------------------------------------------------------
+
+/// Poll until a single resource satisfies `predicate`, returning it.
+///
+/// Fetches the resource by `name` every `interval`. Returns as soon as the
+/// predicate returns `true`. While the resource does not exist, or while the
+/// predicate returns `false`, the loop sleeps `interval` and retries. API
+/// errors double the sleep (capped at 60 s) before retrying.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`wait_for_condition_namespaced`] or [`wait_for_condition_cluster`] for the
+/// common cases.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::wait_for_condition;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use std::time::Duration;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// let cr = wait_for_condition::<MyCR, _, _>(
+///     client,
+///     Namespaced("my-namespace"),
+///     "my-cr",
+///     Duration::from_secs(5),
+///     |r| r.meta().generation == r.meta().generation, // replace with real predicate
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn wait_for_condition<T, Scope, F>(
+    client: Client,
+    scope: Scope,
+    name: &str,
+    interval: Duration,
+    predicate: F,
+) -> Result<T>
+where
+    T: KubeResource,
+    Scope: ApiScope<T> + Clone,
+    F: Fn(&T) -> bool,
+{
+    let kind = T::kind(&());
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Waiting for condition"),
+        None => info!(%kind, %name, "Waiting for condition"),
+    }
+
+    loop {
+        match get_resource_inner(scope.clone().into_api(client.clone()), name).await {
+            Ok(Some(r)) if predicate(&r) => return Ok(r),
+            Ok(Some(_)) => {
+                info!(%kind, %name, ?interval, "Condition not met, retrying");
+                tokio::time::sleep(interval).await;
+            }
+            Ok(None) => {
+                info!(%kind, %name, ?interval, "Resource not found, retrying");
+                tokio::time::sleep(interval).await;
+            }
+            Err(e) => {
+                let backoff = (interval * 2).min(Duration::from_secs(60));
+                error!(%kind, %name, error = %e, ?backoff, "API error, retrying");
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+}
+
+/// Poll until a **namespace-scoped** resource satisfies `predicate`.
+///
+/// Delegates to [`wait_for_condition`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::wait_for_condition_namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use std::time::Duration;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// let cr = wait_for_condition_namespaced::<MyCR, _>(
+///     client,
+///     "my-namespace",
+///     "my-cr",
+///     Duration::from_secs(5),
+///     |r| r.meta().generation == r.meta().generation, // replace with real predicate
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn wait_for_condition_namespaced<T, F>(
+    client: Client,
+    namespace: &str,
+    name: &str,
+    interval: Duration,
+    predicate: F,
+) -> Result<T>
+where
+    T: NamespacedResource,
+    F: Fn(&T) -> bool,
+{
+    wait_for_condition::<T, _, F>(client, Namespaced(namespace), name, interval, predicate).await
+}
+
+/// Poll until a **cluster-scoped** resource satisfies `predicate`.
+///
+/// Delegates to [`wait_for_condition`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use koprs::resources::wait_for_condition_cluster;
+/// use koprs::traits::ClusterResource;
+/// use std::time::Duration;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// let cr = wait_for_condition_cluster::<MyCR, _>(
+///     client,
+///     "my-cr",
+///     Duration::from_secs(5),
+///     |r| r.meta().generation == r.meta().generation, // replace with real predicate
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn wait_for_condition_cluster<T, F>(
+    client: Client,
+    name: &str,
+    interval: Duration,
+    predicate: F,
+) -> Result<T>
+where
+    T: ClusterResource,
+    F: Fn(&T) -> bool,
+{
+    wait_for_condition::<T, _, F>(client, Cluster, name, interval, predicate).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1094,4 +1384,215 @@ where
     T: ClusterResource,
 {
     patch_annotations::<T, _>(client, Cluster, name, annotations).await
+}
+
+// ---------------------------------------------------------------------------
+// Generic public API — remove labels / annotations
+// ---------------------------------------------------------------------------
+
+/// Remove specific label keys from a Kubernetes resource.
+///
+/// Uses a JSON merge patch with `null` values — the specified keys are deleted
+/// while all other labels are preserved. Pass an empty slice to no-op.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`remove_labels_namespaced`] or [`remove_labels_cluster`] for the common cases.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::remove_labels;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// remove_labels::<MyCR, _>(
+///     client,
+///     Namespaced("my-ns"),
+///     "my-cr",
+///     &["app.kubernetes.io/managed-by"],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn remove_labels<T, Scope>(
+    client: Client,
+    scope: Scope,
+    name: &str,
+    keys: &[&str],
+) -> Result<T>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    let kind = T::kind(&());
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Removing labels"),
+        None => info!(%kind, %name, "Removing labels"),
+    }
+    let map: serde_json::Map<String, serde_json::Value> = keys
+        .iter()
+        .map(|k| (k.to_string(), serde_json::Value::Null))
+        .collect();
+    let patch = serde_json::json!({ "metadata": { "labels": map } });
+    patch_metadata_inner(scope.into_api(client), name, patch).await
+}
+
+/// Remove specific label keys from a **namespace-scoped** resource.
+///
+/// Delegates to [`remove_labels`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::remove_labels_namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// remove_labels_namespaced::<MyCR>(client, "my-ns", "my-cr", &["stale-label"]).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn remove_labels_namespaced<T>(
+    client: Client,
+    namespace: &str,
+    name: &str,
+    keys: &[&str],
+) -> Result<T>
+where
+    T: NamespacedResource,
+{
+    remove_labels::<T, _>(client, Namespaced(namespace), name, keys).await
+}
+
+/// Remove specific label keys from a **cluster-scoped** resource.
+///
+/// Delegates to [`remove_labels`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::remove_labels_cluster;
+/// use koprs::traits::ClusterResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// remove_labels_cluster::<MyCR>(client, "my-cr", &["stale-label"]).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn remove_labels_cluster<T>(client: Client, name: &str, keys: &[&str]) -> Result<T>
+where
+    T: ClusterResource,
+{
+    remove_labels::<T, _>(client, Cluster, name, keys).await
+}
+
+/// Remove specific annotation keys from a Kubernetes resource.
+///
+/// Uses a JSON merge patch with `null` values — the specified keys are deleted
+/// while all other annotations are preserved.
+///
+/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument. Prefer
+/// [`remove_annotations_namespaced`] or [`remove_annotations_cluster`] for the
+/// common cases.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::remove_annotations;
+/// use koprs::scope::Namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// remove_annotations::<MyCR, _>(
+///     client,
+///     Namespaced("my-ns"),
+///     "my-cr",
+///     &["kubectl.kubernetes.io/last-applied-configuration"],
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn remove_annotations<T, Scope>(
+    client: Client,
+    scope: Scope,
+    name: &str,
+    keys: &[&str],
+) -> Result<T>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    let kind = T::kind(&());
+    match scope.namespace() {
+        Some(ns) => info!(namespace = %ns, %kind, %name, "Removing annotations"),
+        None => info!(%kind, %name, "Removing annotations"),
+    }
+    let map: serde_json::Map<String, serde_json::Value> = keys
+        .iter()
+        .map(|k| (k.to_string(), serde_json::Value::Null))
+        .collect();
+    let patch = serde_json::json!({ "metadata": { "annotations": map } });
+    patch_metadata_inner(scope.into_api(client), name, patch).await
+}
+
+/// Remove specific annotation keys from a **namespace-scoped** resource.
+///
+/// Delegates to [`remove_annotations`] with [`Namespaced`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::remove_annotations_namespaced;
+/// use koprs::traits::NamespacedResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
+/// remove_annotations_namespaced::<MyCR>(client, "my-ns", "my-cr", &["my-operator/last-synced"]).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn remove_annotations_namespaced<T>(
+    client: Client,
+    namespace: &str,
+    name: &str,
+    keys: &[&str],
+) -> Result<T>
+where
+    T: NamespacedResource,
+{
+    remove_annotations::<T, _>(client, Namespaced(namespace), name, keys).await
+}
+
+/// Remove specific annotation keys from a **cluster-scoped** resource.
+///
+/// Delegates to [`remove_annotations`] with [`Cluster`] as the scope.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use koprs::resources::remove_annotations_cluster;
+/// use koprs::traits::ClusterResource;
+/// use kube::Client;
+///
+/// # async fn example<MyCR: ClusterResource>(client: Client) -> Result<(), KubeGenericError> {
+/// remove_annotations_cluster::<MyCR>(client, "my-cr", &["my-operator/last-synced"]).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn remove_annotations_cluster<T>(client: Client, name: &str, keys: &[&str]) -> Result<T>
+where
+    T: ClusterResource,
+{
+    remove_annotations::<T, _>(client, Cluster, name, keys).await
 }

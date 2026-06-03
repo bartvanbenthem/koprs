@@ -17,15 +17,15 @@ use kube::ResourceExt;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
-use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use kube::Resource;
+use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 
 use koprs::controller::{Action, Context, Reconciler};
 use koprs::error::KubeGenericError;
 use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers_namespaced};
 use koprs::gc::gc_namespaced_resources;
 use koprs::resources::{
-    delete_namespaced_resource, ensure_namespaced_resource, patch_labels_namespaced, EnsureOutcome,
+    EnsureOutcome, delete_namespaced_resource, ensure_namespaced_resource, patch_labels_namespaced,
 };
 use koprs::status::{make_condition, patch_status_namespaced, upsert_condition};
 
@@ -134,7 +134,10 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
             };
             let recorder = Recorder::new(
                 client.clone(),
-                Reporter { controller: FIELD_MANAGER.into(), instance: None },
+                Reporter {
+                    controller: FIELD_MANAGER.into(),
+                    instance: None,
+                },
             );
             recorder
                 .publish(
