@@ -84,11 +84,9 @@ where
 /// for which `is_desired` returns `false`. Resources already in termination
 /// are unblocked by clearing their finalizers.
 ///
-/// This generic form accepts any scope and a predicate so it can express both
-/// the cluster case (`name not in set`) and the namespaced case
-/// (`(namespace, name) not in set`) uniformly. Prefer
-/// [`gc_cluster_resources`] or [`gc_namespaced_resources`] when the scope and
-/// desired-set type are known at compile time.
+/// Accepts any scope and a predicate: pass
+/// [`Cluster`][crate::scope::Cluster] for cluster-scoped resources or
+/// [`Namespaced`][crate::scope::Namespaced] for namespaced ones.
 ///
 /// # Examples
 ///

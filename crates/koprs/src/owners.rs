@@ -5,17 +5,16 @@
 //!   build and attach `metadata.ownerReferences` so Kubernetes can garbage
 //!   collect child resources when their owner is deleted.
 //!
-//! - **Controller wiring** — [`make_object_refs`], [`make_object_refs_namespaced`],
-//!   [`make_object_refs_cluster`], and [`make_object_ref_mapper`] build
-//!   [`ObjectRef`] sets and mapper closures for cross-resource reconcile
-//!   triggers in `kube-runtime` controllers.
+//! - **Controller wiring** — [`make_object_refs`], [`make_object_ref_mapper`],
+//!   and [`owner_label_mapper`] build [`ObjectRef`] sets and mapper closures
+//!   for cross-resource reconcile triggers in `kube-runtime` controllers.
 //!
 //! See: <https://kube.rs/controllers/relations/#watched-relations>
 
 use std::sync::Arc;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::{Api, Client, Resource};
+use kube::{Api, Client, Resource, ResourceExt};
 use kube_runtime::reflector::ObjectRef;
 use tracing::info;
 
@@ -150,9 +149,8 @@ pub fn set_owner_refs<T: KubeResource>(child: &mut T, refs: Vec<OwnerReference>)
 /// Generate [`ObjectRef`]s for all live instances of a resource type.
 ///
 /// Queries the Kubernetes API and returns one `ObjectRef` per resource found.
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
-/// correct API surface at compile time. Prefer [`make_object_refs_namespaced`]
-/// or [`make_object_refs_cluster`] for the common cases.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced]
+/// as the `scope` argument to select the correct API surface at compile time.
 ///
 /// Useful for setting up watched relations in `kube-runtime` controllers.
 /// See: <https://kube.rs/controllers/relations/#watched-relations>
@@ -177,6 +175,50 @@ where
     Scope: ApiScope<T>,
 {
     build_object_refs(scope.into_api(client)).await
+}
+
+/// Build a mapper closure that finds a CR owner from a label on a trigger resource.
+///
+/// The most common cross-resource watch pattern: the trigger resource carries
+/// a label whose *value* is the name of the CR to re-queue. The trigger
+/// resource's namespace is used as the CR's namespace.
+///
+/// Returns `None` (drops the event) when the label is absent or either name
+/// or namespace is empty.
+///
+/// Pass the returned closure to [`ControllerBuilder::watch`][crate::controller::ControllerBuilder::watch]
+/// or directly to `kube_runtime::Controller::watches`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use k8s_openapi::api::core::v1::ConfigMap;
+/// use koprs::owners::owner_label_mapper;
+/// use koprs::controller::{ControllerBuilder, watcher};
+///
+/// # type MyCR = ConfigMap;
+/// # async fn example(api: kube::Api<MyCR>, cm_api: kube::Api<ConfigMap>) {
+/// // owner_label_mapper returns a Fn(ConfigMap) -> Option<ObjectRef<MyCR>>
+/// // ready to pass directly to .watch()
+/// let _mapper = owner_label_mapper::<ConfigMap, MyCR>("my-operator/owner");
+/// # }
+/// ```
+pub fn owner_label_mapper<Trigger, CR>(
+    label: impl Into<String>,
+) -> impl Fn(Trigger) -> Option<ObjectRef<CR>>
+where
+    Trigger: KubeResource,
+    CR: KubeResource,
+{
+    let label = label.into();
+    move |resource: Trigger| {
+        let owner = resource.labels().get(&label).cloned()?;
+        let ns = resource.namespace()?;
+        if owner.is_empty() {
+            return None;
+        }
+        Some(ObjectRef::<CR>::new(&owner).within(&ns))
+    }
 }
 
 /// Build a mapper closure that returns a fixed set of [`ObjectRef`]s for any

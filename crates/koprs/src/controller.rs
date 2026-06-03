@@ -602,15 +602,81 @@ where
         self
     }
 
-    /// Configure additional watches on secondary (trigger) resources.
+    /// Wire a single secondary (trigger) watch using a typed mapper.
     ///
-    /// Accepts a closure that receives the inner `kube_runtime::Controller`
-    /// and returns it, typically with `.watches()` or `.owns()` chained.
+    /// Whenever a resource of type `Other` changes, `mapper` converts it into
+    /// zero or more [`ObjectRef`]s that identify CRs to re-queue. Returning
+    /// `None` / an empty iterator drops the event. Returning
+    /// `Some(ObjectRef::new("my-cr").within("my-ns"))` re-queues that CR.
+    ///
+    /// Multiple calls to `.watch()` compose — each watch is added on top of
+    /// any previously registered watches and `.with_watches()` calls.
+    ///
+    /// Use [`owner_label_mapper`][crate::owners::owner_label_mapper] as the
+    /// `mapper` argument when the trigger resource carries an owner label
+    /// pointing at the CR.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
+    /// use koprs::controller::{ControllerBuilder, watcher};
+    /// use koprs::owners::owner_label_mapper;
+    ///
+    /// async fn example(api: kube::Api<Namespace>, cm_api: kube::Api<ConfigMap>) {
+    ///     // Re-queue the owning Namespace whenever a managed ConfigMap changes.
+    ///     let _builder: ControllerBuilder<Namespace> = ControllerBuilder::new(api)
+    ///         .watch(
+    ///             cm_api,
+    ///             watcher::Config::default().labels("app=my-operator"),
+    ///             owner_label_mapper::<ConfigMap, Namespace>("my-operator/owner"),
+    ///         );
+    ///     // chain .health_port(), .leader_election(), .run(), etc.
+    /// }
+    /// ```
+    pub fn watch<Other, I, F>(
+        mut self,
+        api: kube::Api<Other>,
+        config: watcher::Config,
+        mapper: F,
+    ) -> Self
+    where
+        Other: crate::traits::KubeResource,
+        I: IntoIterator<Item = kube_runtime::reflector::ObjectRef<CR>> + Send + 'static,
+        I::IntoIter: Send,
+        F: Fn(Other) -> I + Send + Sync + 'static,
+    {
+        let existing = self.configure.take();
+        self.configure = Some(Box::new(move |ctl| {
+            let ctl = ctl.watches(api, config, mapper);
+            match existing {
+                Some(f) => f(ctl),
+                None => ctl,
+            }
+        }));
+        self
+    }
+
+    /// Configure additional watches using the full `kube_runtime::Controller` API.
+    ///
+    /// The closure receives the inner controller and must return it, typically
+    /// with `.watches()` or `.owns()` chained. Use this when you need access to
+    /// advanced kube-runtime options not covered by [`watch`][ControllerBuilder::watch].
+    ///
+    /// Multiple calls compose — each call adds on top of previously registered
+    /// watches.
     pub fn with_watches<F>(mut self, configure: F) -> Self
     where
         F: FnOnce(kube_runtime::Controller<CR>) -> kube_runtime::Controller<CR> + Send + 'static,
     {
-        self.configure = Some(Box::new(configure));
+        let existing = self.configure.take();
+        self.configure = Some(Box::new(move |ctl| {
+            let ctl = configure(ctl);
+            match existing {
+                Some(f) => f(ctl),
+                None => ctl,
+            }
+        }));
         self
     }
 

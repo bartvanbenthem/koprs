@@ -136,7 +136,7 @@ where
 
 /// Apply (create or update) a Kubernetes resource using Server-Side Apply.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -184,7 +184,7 @@ where
 /// (404), so callers can treat "already deleted" as success without additional
 /// error handling.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -225,7 +225,7 @@ where
 /// Returns `Ok(None)` on a 404 response rather than an error, so callers can
 /// branch on existence without pattern-matching on [`crate::error::KubeGenericError`].
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -266,7 +266,7 @@ where
 /// Returns `Ok(true)` if the resource is found, `Ok(false)` on a 404.
 /// Does not fetch the full resource — use [`get_resource`] if you need the value.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -309,7 +309,7 @@ where
 /// The benefit is knowing the outcome — useful when downstream steps (status
 /// patches, event emissions) should only run on actual change.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -380,8 +380,8 @@ where
 
 /// List resources of type `T` within the given scope using arbitrary [`ListParams`].
 ///
-/// Pass [`Cluster`] to list across all namespaces (or for cluster-scoped
-/// resources), or [`Namespaced`] to list within a single namespace.
+/// Pass [`Cluster`][crate::scope::Cluster] to list across all namespaces (or for cluster-scoped
+/// resources), or [`Namespaced`][crate::scope::Namespaced] to list within a single namespace.
 ///
 /// # Examples
 ///
@@ -449,7 +449,7 @@ where
 /// errors the interval is doubled (capped at 60 s) before retrying. Returns
 /// as soon as one or more resources are found.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -523,7 +523,7 @@ where
 /// predicate returns `false`, the loop sleeps `interval` and retries. API
 /// errors double the sleep (capped at 60 s) before retrying.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -593,7 +593,7 @@ where
 /// Uses a JSON merge patch so only the specified keys are added or updated —
 /// other labels on the resource are preserved. Pass an empty slice to no-op.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -646,7 +646,7 @@ where
 /// Uses a JSON merge patch so only the specified keys are added or updated —
 /// other annotations on the resource are preserved.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -699,7 +699,7 @@ where
 /// Uses a JSON merge patch with `null` values — the specified keys are deleted
 /// while all other labels are preserved. Pass an empty slice to no-op.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///
@@ -752,7 +752,7 @@ where
 /// Uses a JSON merge patch with `null` values — the specified keys are deleted
 /// while all other annotations are preserved.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// # Examples
 ///

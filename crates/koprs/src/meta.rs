@@ -73,7 +73,7 @@ impl ObjectMetaBuilder {
         self
     }
 
-    /// Add an owner reference (e.g. from [`koprs::owners::owner_ref`]).
+    /// Add an owner reference (e.g. from [`owner_ref`][crate::owners::owner_ref]).
     pub fn owner_ref(mut self, owner_ref: OwnerReference) -> Self {
         self.owner_references.push(owner_ref);
         self

@@ -1,10 +1,13 @@
 // src/main.rs
 //
 // Wires together the controller loop using koprs::controller::ControllerBuilder.
-// Cross-resource trigger: changes to any ConfigMap carrying our managed-by
-// label re-queue the owning ConfigMapSync CR.
 //
-// Operational features wired in:
+// Secondary watches — each .watch() call composes onto the chain:
+//   ConfigMap  — managed ConfigMaps re-queue the owning CR (active feature)
+//   Secret     — demonstrates chaining; extend the reconciler to also manage
+//                Secrets in the target namespace using the same owner label
+//
+// Operational features:
 //   .health_port(8080)         — GET /healthz + GET /readyz for pod probes
 //   .graceful_shutdown()       — clean stop on SIGTERM / Ctrl+C
 //   .leader_election(...)      — Kubernetes Lease-based HA; only one replica reconciles
@@ -15,11 +18,12 @@ mod types;
 
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::ConfigMap;
-use kube::{Api, Client, ResourceExt};
+use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use kube::{Api, Client};
 use tracing::info;
 
-use koprs::controller::{Context, ControllerBuilder, ObjectRef, watcher};
+use koprs::controller::{Context, ControllerBuilder, watcher};
+use koprs::owners::owner_label_mapper;
 
 use crate::reconciler::ConfigMapSyncReconciler;
 use crate::types::ConfigMapSync;
@@ -39,9 +43,10 @@ async fn main() -> anyhow::Result<()> {
     // Primary watched resource — all ConfigMapSync CRs across all namespaces.
     let cms_api: Api<ConfigMapSync> = Api::all(client.clone());
 
-    // Secondary watched resource — ConfigMaps carrying our managed-by label.
-    // Whenever one changes we re-queue the owning ConfigMapSync CR.
+    // Secondary watched resources — both carry the same owner label convention.
+    // .watch() calls compose: both watches are wired simultaneously.
     let cm_api: Api<ConfigMap> = Api::all(client.clone());
+    let secret_api: Api<Secret> = Api::all(client.clone());
 
     let ctx = Context::new(client);
 
@@ -53,27 +58,22 @@ async fn main() -> anyhow::Result<()> {
     //           fieldPath: metadata.namespace
     let operator_ns = std::env::var("OPERATOR_NAMESPACE").unwrap_or_else(|_| "default".to_string());
 
+    let labels = "app.kubernetes.io/managed-by=configmapsync-operator";
+
     ControllerBuilder::new(cms_api)
-        .with_watches(move |ctl| {
-            ctl.watches(
-                cm_api,
-                watcher::Config::default()
-                    .labels("app.kubernetes.io/managed-by=configmapsync-operator"),
-                |cm| {
-                    // The owner label on the ConfigMap tells us which CR to re-queue.
-                    let owner = cm
-                        .labels()
-                        .get("configmapsync.example.io/owner")
-                        .cloned()
-                        .unwrap_or_default();
-                    let ns = cm.namespace().unwrap_or_default();
-                    if owner.is_empty() || ns.is_empty() {
-                        return None;
-                    }
-                    Some(ObjectRef::<ConfigMapSync>::new(&owner).within(&ns))
-                },
-            )
-        })
+        // Watch 1: whenever a managed ConfigMap changes, re-queue the owning CR.
+        .watch(
+            cm_api,
+            watcher::Config::default().labels(labels),
+            owner_label_mapper("configmapsync.example.io/owner"),
+        )
+        // Watch 2: chained — also re-queue when a managed Secret changes.
+        // Both watches use the same owner label convention.
+        .watch(
+            secret_api,
+            watcher::Config::default().labels(labels),
+            owner_label_mapper("configmapsync.example.io/owner"),
+        )
         .health_port(8080)
         .graceful_shutdown()
         .leader_election(operator_ns, "configmapsync-operator-leader")

@@ -32,10 +32,9 @@ where
 /// If the finalizer is already present on the resource the function returns
 /// immediately without making an API call, keeping the patch idempotent.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
-/// correct API surface at compile time. Prefer [`add_finalizer_namespaced`]
-/// or [`add_finalizer_cluster`] for the common cases — they are thin wrappers
-/// around this function.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`] as the `scope` argument to select the
+/// correct API surface at compile time. Use [`add_finalizer_namespaced`]
+/// when the resource's namespace should be extracted from its own metadata.
 ///
 /// # Examples
 ///
@@ -100,10 +99,8 @@ where
 /// Sets `metadata.finalizers` to `null`, which unblocks deletion of any
 /// resource that was held by finalizers.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
-/// correct API surface at compile time. Prefer [`remove_finalizers_namespaced`]
-/// or [`remove_finalizers_cluster`] for the common cases — they are thin
-/// wrappers around this function.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`] as the `scope` argument to select the
+/// correct API surface at compile time.
 ///
 /// # Examples
 ///

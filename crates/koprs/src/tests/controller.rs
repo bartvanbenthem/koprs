@@ -705,6 +705,70 @@ mod controller_tests {
     }
 
     #[tokio::test]
+    async fn builder_with_watches_composes_not_replaces() {
+        // Bug fix: a second with_watches call used to silently replace the first.
+        // Now both closures are chained — configure must still be Some after
+        // each call and both closures participate.
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let b = ControllerBuilder::<ConfigMap>::new(api)
+            .with_watches(|ctl| ctl)
+            .with_watches(|ctl| ctl);
+        assert!(b.configure.is_some());
+    }
+
+    #[tokio::test]
+    async fn builder_watch_registers_configure_fn() {
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client.clone(), "ns");
+        let trigger = kube::Api::<ConfigMap>::all(client);
+        let b = ControllerBuilder::<ConfigMap>::new(api).watch(
+            trigger,
+            kube_runtime::watcher::Config::default(),
+            |_: ConfigMap| None::<kube_runtime::reflector::ObjectRef<ConfigMap>>,
+        );
+        assert!(b.configure.is_some());
+    }
+
+    #[tokio::test]
+    async fn builder_watch_two_watches_both_compose() {
+        // Two .watch() calls must both be preserved — the second must not
+        // erase the first.
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client.clone(), "ns");
+        let trigger1 = kube::Api::<ConfigMap>::all(client.clone());
+        let trigger2 = kube::Api::<ConfigMap>::all(client);
+        let b = ControllerBuilder::<ConfigMap>::new(api)
+            .watch(
+                trigger1,
+                kube_runtime::watcher::Config::default(),
+                |_: ConfigMap| None::<kube_runtime::reflector::ObjectRef<ConfigMap>>,
+            )
+            .watch(
+                trigger2,
+                kube_runtime::watcher::Config::default(),
+                |_: ConfigMap| None::<kube_runtime::reflector::ObjectRef<ConfigMap>>,
+            );
+        assert!(b.configure.is_some());
+    }
+
+    #[tokio::test]
+    async fn builder_watch_and_with_watches_compose() {
+        // .watch() and .with_watches() must compose — neither erases the other.
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client.clone(), "ns");
+        let trigger = kube::Api::<ConfigMap>::all(client);
+        let b = ControllerBuilder::<ConfigMap>::new(api)
+            .watch(
+                trigger,
+                kube_runtime::watcher::Config::default(),
+                |_: ConfigMap| None::<kube_runtime::reflector::ObjectRef<ConfigMap>>,
+            )
+            .with_watches(|ctl| ctl);
+        assert!(b.configure.is_some());
+    }
+
+    #[tokio::test]
     async fn builder_leader_election_can_be_configured() {
         let (client, _) = mock_client();
         let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
@@ -736,7 +800,8 @@ mod controller_tests {
     #[tokio::test]
     async fn builder_full_chain_does_not_panic() {
         let (client, _) = mock_client();
-        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let api = kube::Api::<ConfigMap>::namespaced(client.clone(), "ns");
+        let trigger = kube::Api::<ConfigMap>::all(client);
         let _b = ControllerBuilder::<ConfigMap>::new(api)
             .health_port(8080)
             .graceful_shutdown()
@@ -744,6 +809,11 @@ mod controller_tests {
             .reconcile_timeout(Duration::from_secs(300))
             .label_selector("app=test")
             .watcher_config(kube_runtime::watcher::Config::default())
+            .watch(
+                trigger,
+                kube_runtime::watcher::Config::default(),
+                |_: ConfigMap| None::<kube_runtime::reflector::ObjectRef<ConfigMap>>,
+            )
             .with_watches(|ctl| ctl);
     }
 

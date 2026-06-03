@@ -51,7 +51,7 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 - **Garbage collection** — diff-based GC for orphaned cluster and namespaced resources, with stuck-termination recovery
 - **Watchers** — three levels of `mpsc`-based background watchers: `watch` (unit signal), `watch_objects` (resource data on applies), `watch_events` (full `WatchEvent<T>` including deletions). All use the same scope + optional label-selector API.
 - **Listing** — list resources across namespaces or within a namespace, with or without label selectors
-- **Ownership & controller wiring** — build `OwnerReference`s, set owner refs on children, generate `ObjectRef` sets, and create mapper closures for cross-resource reconcile triggers
+- **Ownership & controller wiring** — build `OwnerReference`s, set owner refs on children, generate `ObjectRef` sets. `ControllerBuilder::watch()` wires secondary watches with composable chaining; `owner_label_mapper` covers the common "re-queue CR from owner label" pattern
 - **Status conditions** — `KoprsCondition` is a `JsonSchema`-compatible condition type that can be used directly in CRD status structs. `make_condition` builds one with the current timestamp; `upsert_condition` merges it into a `Vec<KoprsCondition>` with `lastTransitionTime` preservation. `From` impls bridge to/from the k8s-openapi `Condition` type when needed.
 - **Metadata builder** — `ObjectMetaBuilder` builds an `ObjectMeta` fluently: `.name()`, `.namespace()`, `.label()`, `.labels()`, `.annotation()`, `.owner_ref()`, `.build()`
 - **Deletion guard** — `koprs::is_being_deleted(resource)` returns `true` when `deletionTimestamp` is set; use this at the top of the reconcile loop to branch into the cleanup path
@@ -81,7 +81,7 @@ koprs = { path = "../koprs" }
 | `finalizers` | Add and remove finalizers |
 | `gc` | Garbage collect orphaned resources |
 | `watcher` | `watch` (signal), `watch_objects` (resource data), `watch_events` (applied + deleted); `WatchEvent<T>` type |
-| `owners` | Owner references, child wiring, `ObjectRef` sets, and mapper closures |
+| `owners` | Owner references, child wiring, `ObjectRef` sets, `owner_label_mapper`, and mapper closures |
 | `scope` | `Cluster` and `Namespaced` scope markers for compile-time API selection |
 | `traits` | `KubeResource`, `NamespacedResource`, `ClusterResource` trait aliases; `is_being_deleted` helper |
 | `error` | `KubeGenericError` enum |
@@ -305,11 +305,42 @@ let items = wait_for_resources::<MyCR, _>(
 ).await?;
 ```
 
-### Ownership and controller wiring
+### Cross-resource watches and ownership
+
+#### `.watch()` — secondary trigger wiring
+
+Use `.watch()` on `ControllerBuilder` to re-queue a CR whenever a secondary resource changes. Multiple calls compose — all watches are active simultaneously.
+
+`owner_label_mapper` covers the most common pattern: the trigger resource carries a label whose *value* is the name of the CR to re-queue, and its namespace is where the CR lives.
+
+```rust
+use koprs::controller::{ControllerBuilder, watcher};
+use koprs::owners::owner_label_mapper;
+
+ControllerBuilder::new(primary_api)
+    // Re-queue owning CR when a managed ConfigMap changes.
+    .watch(
+        cm_api,
+        watcher::Config::default().labels("app=my-operator"),
+        owner_label_mapper("my-operator/owner"),
+    )
+    // Chain a second watch for a different resource type — both are active.
+    .watch(
+        secret_api,
+        watcher::Config::default().labels("app=my-operator"),
+        owner_label_mapper("my-operator/owner"),
+    )
+    // Use .with_watches() for full kube-runtime Controller access when needed.
+    .with_watches(|ctl| ctl.owns(/* ... */))
+    .run(MyReconciler, ctx)
+    .await?;
+```
+
+#### Owner references
 
 ```rust
 use koprs::owners::{controller_ref, set_owner_refs, make_object_refs, make_object_ref_mapper};
-use koprs::scope::{Cluster, Namespaced};
+use koprs::scope::Namespaced;
 use std::sync::Arc;
 
 let oref = controller_ref(&parent_cr)?;

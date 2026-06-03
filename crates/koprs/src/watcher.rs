@@ -74,7 +74,7 @@ where
 /// An optional `label_selector` narrows the watch to matching resources only.
 /// Pass `None` to watch all resources of the given type.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument to select the
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument to select the
 /// correct API surface at compile time.
 ///
 /// Returns a [`JoinHandle`] for the background task. The task shuts down
@@ -141,7 +141,7 @@ where
 /// An optional `label_selector` narrows the watch to matching resources only.
 /// Pass `None` to watch all resources of the given type.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// Returns a [`JoinHandle`] for the background task. The task shuts down
 /// automatically when all receivers are dropped.
@@ -223,7 +223,7 @@ where
 /// An optional `label_selector` narrows the watch to matching resources only.
 /// Pass `None` to watch all resources of the given type.
 ///
-/// Pass [`Cluster`] or [`Namespaced`] as the `scope` argument.
+/// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
 /// Returns a [`JoinHandle`] for the background task. The task shuts down
 /// automatically when all receivers are dropped.
