@@ -1,15 +1,11 @@
 # KOPRS - Kubernetes Operators Rust
 
-A reusable, ergonomic library that streamlines Kubernetes operator development. By providing generic implementations for the most common operator patterns, it eliminates widespread boilerplate across your codebase. It integrates tightly with the `kube-rs` ecosystem to handle repetitive operational scaffolding, allowing developers to build reliable controllers with significantly less code.
+A reusable, ergonomic library that eliminates Kubernetes operator boilerplate by providing generic implementations of the most common patterns on top of `kube-rs`.
 
 
 ## Architecture Overview
 
-`koprs` is an opinionated, high-level orchestration framework built directly on top of `kube` and `kube-runtime`. While kube provides type-safe Kubernetes API bindings and kube-runtime delivers the controller primitives, koprs abstracts away the repetitive boilerplate required to build production ready controllers.
-
-It encapsulates complex infrastructure orchestration loops, robust Server-Side Apply (SSA) patterns, and automated background garbage collection/cleanup processes out of your controller's core codebase. Additionally, it streamlines state synchronization with ready to use watcher logic and provides a strongly typed error handling model that removes the friction of building custom Kubernetes error variants from scratch. Every generic operation comes out of the box with structured, built-in `tracing` instrumentation, giving you deep visibility into your controller's execution paths without additional setup.
-
-By lifting these structural requirements off your shoulders, koprs leaves you free to focus purely on your custom business logic.
+`koprs` is an opinionated, high-level orchestration framework built directly on top of `kube` and `kube-runtime`. It encapsulates SSA patterns, controller lifecycle management, garbage collection, watcher logic, and a strongly typed error model, all with built-in `tracing` instrumentation, so you can focus purely on your custom business logic.
 
 
 ```bash
@@ -34,8 +30,6 @@ By lifting these structural requirements off your shoulders, koprs leaves you fr
 ---
 
 ## What koprs adds over plain kube-rs
-
-Plain `kube` gives you `Api` + `Client`. `kube-runtime` gives you a raw `Controller` stream. Everything below is what koprs adds on top:
 
 | Area | koprs | plain kube / kube-runtime |
 |---|---|---|
@@ -110,21 +104,6 @@ ControllerBuilder::new(Api::<MyCR>::all(client.clone()))
     .run(MyReconciler, ctx)
     .await?;
 ```
-
-### Resource operations
-- **Apply & delete** — cluster-scoped and namespaced resources via Server-Side Apply (SSA)
-- **Get** — fetch a single resource by name, returning `Option<T>` (`None` on 404)
-- **Status patching** — patch the `/status` subresource of any CRD, cluster-scoped or namespaced
-- **Finalizers** — add and remove finalizers on cluster-scoped and namespaced resources
-- **Garbage collection** — diff-based GC for orphaned cluster and namespaced resources, with stuck-termination recovery
-- **Watchers** — three levels of `mpsc`-based background watchers: `watch` (unit signal), `watch_objects` (resource data on applies), `watch_events` (full `WatchEvent<T>` including deletions). All use the same scope + optional label-selector API.
-- **Listing** — list resources across namespaces or within a namespace, with or without label selectors
-- **Ownership & controller wiring** — build `OwnerReference`s, set owner refs on children, generate `ObjectRef` sets. `ControllerBuilder::watch()` wires secondary watches with composable chaining; `owner_label_mapper` covers the common "re-queue CR from owner label" pattern
-- **Status conditions** — `KoprsCondition` is a `JsonSchema`-compatible condition type that can be used directly in CRD status structs. `make_condition` builds one with the current timestamp; `upsert_condition` merges it into a `Vec<KoprsCondition>` with `lastTransitionTime` preservation. `From` impls bridge to/from the k8s-openapi `Condition` type when needed.
-- **Metadata builder** — `ObjectMetaBuilder` builds an `ObjectMeta` fluently: `.name()`, `.namespace()`, `.label()`, `.labels()`, `.annotation()`, `.owner_ref()`, `.build()`
-- **Deletion guard** — `koprs::is_being_deleted(resource)` returns `true` when `deletionTimestamp` is set; use this at the top of the reconcile loop to branch into the cleanup path
-- **Patch labels / annotations** — merge labels or annotations onto any resource without replacing existing ones
-- **Typed errors** — `KubeGenericError` enum via `thiserror`, pattern-matchable by callers
 
 ---
 
