@@ -5,6 +5,7 @@ mod error;
 mod events;
 mod finalizers;
 mod gc;
+mod meta;
 mod owners;
 mod resources;
 mod scope;

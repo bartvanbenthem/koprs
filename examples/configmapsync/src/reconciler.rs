@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use k8s_openapi::api::core::v1::ConfigMap;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta};
 use kube::ResourceExt;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
@@ -22,12 +21,14 @@ use koprs::error::KubeGenericError;
 use koprs::events::{EventType, record_event};
 use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers_namespaced};
 use koprs::gc::gc_namespaced_resources;
+use koprs::is_being_deleted;
+use koprs::meta::ObjectMetaBuilder;
 use koprs::resources::{
     EnsureOutcome, delete_namespaced_resource, ensure_namespaced_resource, patch_labels_namespaced,
 };
 use koprs::status::{make_condition, patch_status_namespaced, upsert_condition};
 
-use crate::types::{ConfigMapSync, ConfigMapSyncStatus, SyncCondition};
+use crate::types::{ConfigMapSync, ConfigMapSyncStatus};
 
 const FINALIZER: &str = "configmapsync.example.io/cleanup";
 const FIELD_MANAGER: &str = "configmapsync-operator";
@@ -71,7 +72,7 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
         // -------------------------------------------------------------------
         // Deletion path
         // -------------------------------------------------------------------
-        if cr.metadata.deletion_timestamp.is_some() {
+        if is_being_deleted(&*cr) {
             info!(cr = %name, "deletion timestamp set — running cleanup");
 
             let target_ns = &cr.spec.target_namespace;
@@ -165,10 +166,10 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
         let generation = cr.metadata.generation;
         let status_message = format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'");
 
-        let mut conditions: Vec<Condition> = cr
+        let mut conditions = cr
             .status
             .as_ref()
-            .map(|s| s.conditions.iter().map(sync_to_k8s_condition).collect())
+            .map(|s| s.conditions.clone())
             .unwrap_or_default();
         upsert_condition(
             &mut conditions,
@@ -188,7 +189,7 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
             ConfigMapSyncStatus {
                 ready: true,
                 message: status_message,
-                conditions: conditions.into_iter().map(k8s_to_sync_condition).collect(),
+                conditions,
             },
             FIELD_MANAGER,
         )
@@ -217,38 +218,6 @@ fn configmap_name(cr_name: &str) -> String {
     format!("cms-{cr_name}")
 }
 
-fn sync_to_k8s_condition(sc: &SyncCondition) -> Condition {
-    use chrono::DateTime;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
-    Condition {
-        type_: sc.type_.clone(),
-        status: sc.status.clone(),
-        reason: sc.reason.clone(),
-        message: sc.message.clone(),
-        observed_generation: sc.observed_generation,
-        last_transition_time: Time(
-            DateTime::parse_from_rfc3339(&sc.last_transition_time)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-        ),
-    }
-}
-
-fn k8s_to_sync_condition(c: Condition) -> SyncCondition {
-    use chrono::SecondsFormat;
-    SyncCondition {
-        type_: c.type_,
-        status: c.status,
-        reason: c.reason,
-        message: c.message,
-        last_transition_time: c
-            .last_transition_time
-            .0
-            .to_rfc3339_opts(SecondsFormat::Secs, true),
-        observed_generation: c.observed_generation,
-    }
-}
-
 fn build_configmap(
     name: &str,
     namespace: &str,
@@ -256,21 +225,12 @@ fn build_configmap(
     data: &BTreeMap<String, String>,
 ) -> ConfigMap {
     ConfigMap {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
-            labels: Some(BTreeMap::from([
-                (
-                    "app.kubernetes.io/managed-by".to_string(),
-                    "configmapsync-operator".to_string(),
-                ),
-                (
-                    "configmapsync.example.io/owner".to_string(),
-                    owner_cr.to_string(),
-                ),
-            ])),
-            ..Default::default()
-        },
+        metadata: ObjectMetaBuilder::new()
+            .name(name)
+            .namespace(namespace)
+            .label("app.kubernetes.io/managed-by", "configmapsync-operator")
+            .label("configmapsync.example.io/owner", owner_cr)
+            .build(),
         data: Some(data.clone()),
         ..Default::default()
     }

@@ -58,6 +58,29 @@ impl<T> KubeResource for T where
 {
 }
 
+/// Returns `true` if the resource has a `deletionTimestamp` set.
+///
+/// A non-empty `deletionTimestamp` means Kubernetes has accepted a delete
+/// request but is waiting for finalizers to be removed before the object is
+/// actually deleted. Use this at the top of a reconcile loop to branch into
+/// the cleanup path.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::is_being_deleted;
+/// use koprs::traits::KubeResource;
+///
+/// fn handle<T: KubeResource>(resource: &T) {
+///     if is_being_deleted(resource) {
+///         // remove finalizers, clean up owned resources
+///     }
+/// }
+/// ```
+pub fn is_being_deleted<T: KubeResource>(resource: &T) -> bool {
+    resource.meta().deletion_timestamp.is_some()
+}
+
 /// Marker trait for Kubernetes resources that are **namespaced-scoped**.
 ///
 /// This trait guarantees that the resource can only be used with APIs that

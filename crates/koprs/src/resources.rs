@@ -123,6 +123,13 @@ where
         .await?)
 }
 
+async fn list_inner<T>(api: Api<T>, params: ListParams) -> Result<ObjectList<T>>
+where
+    T: KubeResource,
+{
+    Ok(api.list(&params).await?)
+}
+
 // ---------------------------------------------------------------------------
 // Generic public API — apply
 // ---------------------------------------------------------------------------
@@ -683,6 +690,44 @@ where
 // Listing
 // ---------------------------------------------------------------------------
 
+/// List resources of type `T` within the given scope using arbitrary [`ListParams`].
+///
+/// Pass [`Cluster`] to list across all namespaces (or for cluster-scoped
+/// resources), or [`Namespaced`] to list within a single namespace. Build
+/// a [`ListParams`] to filter by label or field selector.
+///
+/// Prefer the typed convenience wrappers ([`list_resources`],
+/// [`list_namespaced_resources`], [`list_resources_by_label`], etc.) when the
+/// scope and filter are known at the call site.
+///
+/// # Examples
+///
+/// ```no_run
+/// use koprs::error::KubeGenericError;
+/// use kube::Client;
+/// use kube::api::ListParams;
+/// use k8s_openapi::api::core::v1::Pod;
+/// use koprs::resources::list_resources_scoped;
+/// use koprs::scope::Namespaced;
+///
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
+/// let params = ListParams::default().labels("app=my-operator");
+/// let pods = list_resources_scoped::<Pod, _>(client, Namespaced("my-ns"), params).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn list_resources_scoped<T, Scope>(
+    client: Client,
+    scope: Scope,
+    params: ListParams,
+) -> Result<ObjectList<T>>
+where
+    T: KubeResource,
+    Scope: ApiScope<T>,
+{
+    list_inner(scope.into_api(client), params).await
+}
+
 /// List all resources of type `T` across all namespaces.
 ///
 /// # Examples
@@ -702,8 +747,7 @@ pub async fn list_resources<T>(client: Client) -> Result<ObjectList<T>>
 where
     T: KubeResource,
 {
-    let api: Api<T> = Api::all(client);
-    Ok(api.list(&Default::default()).await?)
+    list_inner(Api::all(client), Default::default()).await
 }
 
 /// List all resources of type `T` matching a label selector.
@@ -728,9 +772,11 @@ pub async fn list_resources_by_label<T>(
 where
     T: KubeResource,
 {
-    let api: Api<T> = Api::all(client);
-    let lp = ListParams::default().labels(label_selector);
-    Ok(api.list(&lp).await?)
+    list_inner(
+        Api::all(client),
+        ListParams::default().labels(label_selector),
+    )
+    .await
 }
 
 /// List all resources of type `T` in a specific namespace.
@@ -752,8 +798,7 @@ pub async fn list_namespaced_resources<T>(client: Client, namespace: &str) -> Re
 where
     T: NamespacedResource,
 {
-    let api: Api<T> = Api::namespaced(client, namespace);
-    Ok(api.list(&Default::default()).await?)
+    list_inner(Api::namespaced(client, namespace), Default::default()).await
 }
 
 /// List all resources of type `T` in a specific namespace matching a label selector.
@@ -779,9 +824,11 @@ pub async fn list_namespaced_resources_by_label<T>(
 where
     T: NamespacedResource,
 {
-    let api: Api<T> = Api::namespaced(client, namespace);
-    let lp = ListParams::default().labels(label_selector);
-    Ok(api.list(&lp).await?)
+    list_inner(
+        Api::namespaced(client, namespace),
+        ListParams::default().labels(label_selector),
+    )
+    .await
 }
 
 /// List all resources of type `T` matching a field selector.
@@ -803,9 +850,11 @@ pub async fn list_by_field<T>(client: Client, field_selector: &str) -> Result<Ob
 where
     T: KubeResource,
 {
-    let api: Api<T> = Api::all(client);
-    let lp = ListParams::default().fields(field_selector);
-    Ok(api.list(&lp).await?)
+    list_inner(
+        Api::all(client),
+        ListParams::default().fields(field_selector),
+    )
+    .await
 }
 
 /// List all resources of type `T` in a specific namespace matching a field selector.
@@ -831,9 +880,11 @@ pub async fn list_namespaced_by_field<T>(
 where
     T: NamespacedResource,
 {
-    let api: Api<T> = Api::namespaced(client, namespace);
-    let lp = ListParams::default().fields(field_selector);
-    Ok(api.list(&lp).await?)
+    list_inner(
+        Api::namespaced(client, namespace),
+        ListParams::default().fields(field_selector),
+    )
+    .await
 }
 
 /// List the names of all resources of type `T` matching a label selector,

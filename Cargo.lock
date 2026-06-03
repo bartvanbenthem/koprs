@@ -872,6 +872,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "kube-runtime",
+ "schemars",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

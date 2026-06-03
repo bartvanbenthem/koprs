@@ -520,8 +520,13 @@ mod status_tests {
         let before = chrono::Utc::now();
         let c = make_condition("Ready", "True", "R", "M", None);
         let after = chrono::Utc::now();
-        assert!(c.last_transition_time.0 >= before);
-        assert!(c.last_transition_time.0 <= after);
+        let t = chrono::DateTime::parse_from_rfc3339(&c.last_transition_time)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // KoprsCondition stores seconds precision; t may be up to 1 s behind `before`
+        // due to truncation, so we allow a 1-second tolerance on the lower bound.
+        assert!(before - t < chrono::Duration::seconds(1));
+        assert!(t <= after);
     }
 
     // -----------------------------------------------------------------------
@@ -567,16 +572,20 @@ mod status_tests {
 
     #[test]
     fn upsert_condition_updates_transition_time_when_status_changes() {
-        let original = make_condition("Ready", "False", "Init", "Not ready", None);
-        let original_time = original.last_transition_time.clone();
+        // Use fixed RFC 3339 strings so the test is not sensitive to wall-clock
+        // precision (KoprsCondition truncates to seconds, so two conditions
+        // created in the same second would otherwise appear identical).
+        let mut original = make_condition("Ready", "False", "Init", "Not ready", None);
+        original.last_transition_time = "2024-01-01T00:00:00Z".to_string();
         let mut conditions = vec![original];
 
-        // Status changed — lastTransitionTime must be updated
-        let updated = make_condition("Ready", "True", "Done", "Ready now", None);
+        // Status changed — lastTransitionTime must use the new condition's value.
+        let mut updated = make_condition("Ready", "True", "Done", "Ready now", None);
+        updated.last_transition_time = "2024-01-02T00:00:00Z".to_string();
         let new_time = updated.last_transition_time.clone();
         upsert_condition(&mut conditions, updated);
 
-        assert_ne!(conditions[0].last_transition_time, original_time);
         assert_eq!(conditions[0].last_transition_time, new_time);
+        assert_ne!(conditions[0].last_transition_time, "2024-01-01T00:00:00Z");
     }
 }

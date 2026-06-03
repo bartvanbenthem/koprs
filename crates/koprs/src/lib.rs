@@ -34,6 +34,7 @@ pub mod error;
 pub mod events;
 pub mod finalizers;
 pub mod gc;
+pub mod meta;
 pub mod owners;
 pub mod resources;
 pub mod scope;
@@ -42,6 +43,7 @@ pub mod traits;
 pub mod watcher;
 
 pub use error::KubeGenericError;
+pub use traits::is_being_deleted;
 
 #[cfg(test)]
 mod tests;
