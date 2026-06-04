@@ -1,6 +1,6 @@
 # Kubernetes Operator SDK for Rust
 
-The project behind [`koprs`](./crates/koprs), a high-level Kubernetes operator library for Rust.
+[`koprs`](./crates/koprs) is a high-level Kubernetes operator library for Rust.
 
 Operators make it easy to manage complex stateful applications on top of Kubernetes. However writing an Operator today can be difficult because of challenges such as using low level APIs, writing boilerplate, and a lack of modularity which leads to duplication.
 
@@ -24,7 +24,7 @@ tooling for CRDs and RBAC.
 ## Workspace layout
 
 ```
-operator-sdk-rs/
+koprs/
 ├── Cargo.toml                  # workspace manifest
 ├── Cargo.lock
 └── crates/
@@ -71,15 +71,17 @@ cargo build -p koprs
 cargo test
 
 # integration tests
-kind create cluster --name operator-sdk-rs-test
+kind create cluster --name koprs-test
 cargo test --features integration --test integration
-kind delete cluster --name operator-sdk-rs-test
+kind delete cluster --name koprs-test
 ```
 
 ### CI
 
 `cargo-ci.sh` runs all quality checks in sequence — format, type-check,
 unit tests, integration tests, coverage, release build, docs, and audit.
+
+[![CI](https://github.com/bartvanbenthem/operator-sdk-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/bartvanbenthem/operator-sdk-rs/actions/workflows/ci.yml)
 
 ```bash
 ./scripts/cargo-ci.sh                           # run all steps
