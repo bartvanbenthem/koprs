@@ -81,7 +81,7 @@ kind delete cluster --name koprs-test
 `cargo-ci.sh` runs all quality checks in sequence — format, type-check,
 unit tests, integration tests, coverage, release build, docs, and audit.
 
-[![CI](https://github.com/bartvanbenthem/operator-sdk-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/bartvanbenthem/operator-sdk-rs/actions/workflows/ci.yml)
+[![CI](https://github.com/bartvanbenthem/koprs/actions/workflows/ci.yml/badge.svg)](https://github.com/bartvanbenthem/koprs/actions/workflows/ci.yml)
 
 ```bash
 ./scripts/cargo-ci.sh                           # run all steps
