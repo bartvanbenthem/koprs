@@ -57,6 +57,7 @@ A reusable, ergonomic library that eliminates Kubernetes operator boilerplate by
 | Method | What it provides |
 |--------|-----------------|
 | `.health_port(port)` | `GET /healthz` (liveness) + `GET /readyz` (readiness) HTTP server |
+| `.metrics_port(port)` | `GET /metrics` Prometheus endpoint — reconcile counts, error counts, and duration histograms, recorded automatically around every reconcile |
 | `.graceful_shutdown()` | Clean stop on SIGTERM or Ctrl+C |
 | `.leader_election(ns, name)` | Kubernetes Lease-based HA — only one replica reconciles at a time |
 | `.leader_election_timings(dur, renew, retry)` | Override lease duration, renew period, and retry period (call after `.leader_election()`) |
@@ -128,6 +129,7 @@ koprs = { path = "../koprs" }
 | `finalizers` | Add and remove finalizers |
 | `gc` | Garbage collect orphaned resources |
 | `watcher` | `watch` (signal), `watch_objects` (resource data), `watch_events` (applied + deleted); `WatchEvent<T>` type |
+| `observability` | `Metrics` — Prometheus collectors for reconcile counts, errors, and durations; wired in via `.metrics_port()` |
 | `owners` | Owner references, child wiring, `ObjectRef` sets, `owner_label_mapper`, and mapper closures |
 | `scope` | `Cluster` and `Namespaced` scope markers for compile-time API selection |
 | `traits` | `KubeResource`, `NamespacedResource`, `ClusterResource` trait aliases; `is_being_deleted` helper |
@@ -408,6 +410,28 @@ patch_annotations::<MyCR, _>(client.clone(), Namespaced("my-ns"), "my-cr", &[("m
 ensure_namespace(client.clone(), "my-ns", "my-operator").await?;
 ```
 
+### Observability
+
+`ControllerBuilder::metrics_port` starts a Prometheus endpoint that records
+reconcile counts, error counts (by kind and error), and reconcile latency
+histograms automatically — no manual instrumentation needed:
+
+```rust
+use koprs::controller::ControllerBuilder;
+
+ControllerBuilder::new(api)
+    .metrics_port(9090)
+    .run(MyReconciler, ctx)
+    .await?;
+```
+
+`GET /metrics` then serves `koprs_reconciliations_total`,
+`koprs_reconcile_errors_total`, and `koprs_reconcile_duration_seconds` in
+Prometheus text-exposition format. Use [`Metrics`](src/observability.rs)
+directly if you need the collectors outside of `ControllerBuilder` — for
+example to register them on your own `Registry` or record custom reconcile
+outcomes.
+
 ---
 
 ### Error handling
@@ -464,6 +488,7 @@ src/tests/
 ├── meta.rs
 ├── finalizers.rs
 ├── gc.rs
+├── observability.rs
 ├── owners.rs
 ├── watcher.rs
 ├── scope.rs
