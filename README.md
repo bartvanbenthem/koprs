@@ -1,18 +1,14 @@
-# Kubernetes Operator SDK for Rust
+# Kubernetes Operators in Rust
 
 [`koprs`](./crates/koprs) is a high-level Kubernetes operator library for Rust.
 
 Operators make it easy to manage complex stateful applications on top of Kubernetes. However writing an Operator today can be difficult because of challenges such as using low level APIs, writing boilerplate, and a lack of modularity which leads to duplication.
 
-The Operator SDK for Rust is a framework that uses [`kube`](https://github.com/kube-rs/kube) and [`kube-runtime`](https://crates.io/crates/kube-runtime) libraries to make writing operators easier by providing:
+The Koprs crate for Rust is a framework that uses [`kube`](https://github.com/kube-rs/kube) and [`kube-runtime`](https://crates.io/crates/kube-runtime) libraries to make writing operators easier by providing: High level APIs and abstractions to write the operational logic more intuitively and extensions to cover common Operator use cases.
 
-* High level APIs and abstractions to write the operational logic more intuitively
-* Tools for scaffolding and code generation to bootstrap a new project fast
-* Extensions to cover common Operator use cases
+This repository contains the core framework and example operators.
 
-This repository contains the core framework.
-
-## Crates
+## Crate
 
 | Crate | Description | Docs |
 |-------|-------------|------|
