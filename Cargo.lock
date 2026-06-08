@@ -930,19 +930,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "koprs-derive"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "koprs-gen"
-version = "0.1.0"
-
-[[package]]
 name = "kube"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

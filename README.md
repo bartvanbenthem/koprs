@@ -10,16 +10,13 @@ The Operator SDK for Rust is a framework that uses [`kube`](https://github.com/k
 * Tools for scaffolding and code generation to bootstrap a new project fast
 * Extensions to cover common Operator use cases
 
-This repository contains the core framework, its proc macros, and the manifest generation 
-tooling for CRDs and RBAC.
+This repository contains the core framework.
 
 ## Crates
 
 | Crate | Description | Docs |
 |-------|-------------|------|
 | [`koprs`](./crates/koprs) | Core generic runtime framework | [![docs.rs](https://img.shields.io/docsrs/koprs)](https://docs.rs/koprs) [![crates.io](https://img.shields.io/crates/v/koprs)](https://crates.io/crates/koprs) |
-| [`koprs-derive`](./crates/koprs-derive) | Proc macros — implementation detail | [![docs.rs](https://img.shields.io/docsrs/koprs-derive)](https://docs.rs/koprs-derive) [![crates.io](https://img.shields.io/crates/v/koprs-derive)](https://crates.io/crates/koprs-derive) |
-| [`koprs-gen`](./crates/koprs-gen) | CRD and RBAC manifest generation CLI | [![docs.rs](https://img.shields.io/docsrs/koprs-gen)](https://docs.rs/koprs-gen) [![crates.io](https://img.shields.io/crates/v/koprs-gen)](https://crates.io/crates/koprs-gen) |
 
 ## Workspace layout
 
@@ -28,9 +25,7 @@ koprs/
 ├── Cargo.toml                  # workspace manifest
 ├── Cargo.lock
 └── crates/
-    ├── koprs/                  # core library
-    ├── koprs-derive/           # proc macros
-    └── koprs-gen/              # codegen CLI
+    └── koprs/                  # core library
 ```
 
 ## Getting started
@@ -38,11 +33,6 @@ koprs/
 If you are here to build a Kubernetes operator, you want [`koprs`](./crates/koprs). Start there.
 
 For a working end-to-end example, see the [configmapsync operator](./examples/configmapsync/README.md).
-
-
-If you want to generate CRD or RBAC manifests from your annotated Rust types, you want [`koprs-gen`](./crates/koprs-gen). 
-> [!WARNING] 
-> `koprs-gen` is under development and not yet available.
 
 ## Contributing
 
@@ -96,18 +86,14 @@ unit tests, integration tests, coverage, release build, docs, and audit.
 
 ### Publishing
 
-`publish.sh` handles the full pre-flight and publishes all three crates to crates.io in
-dependency order — `koprs-derive`, `koprs`, `koprs-gen`.
+`publish.sh` handles the full pre-flight and publishes the crate to crates.io.
 
 ```bash
-./scripts/publish.sh                    # full pre-flight + publish all crates
+./scripts/publish.sh                    # full pre-flight + publish
 ./scripts/publish.sh --dry-run          # stop before cargo publish
 ./scripts/publish.sh --skip-ci          # skip CI checks, publish only
 ./scripts/publish.sh --crate koprs      # publish a single crate
 ```
-
-A 20 second delay is applied between each crate to allow crates.io to index before the
-next crate resolves it as a registry dependency.
 
 See the [CI script docs](./scripts/cargo-ci.sh) for the full list of flags.
 

@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 # scripts/publish.sh — publish koprs workspace crates to crates.io
 #
-# Publishes in dependency order:
-#   1. koprs-derive
-#   2. koprs
-#   3. koprs-gen
-#
 # Usage:
 #   ./scripts/publish.sh              # full pre-flight + publish
 #   ./scripts/publish.sh --dry-run    # stop before `cargo publish`
@@ -39,7 +34,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "  --dry-run          run all checks but stop before cargo publish"
       echo "  --skip-ci          skip CI checks, go straight to packaging + publish"
-      echo "  --crate <name>     publish a single crate (koprs-derive | koprs | koprs-gen)"
+      echo "  --crate <name>     publish a single crate (koprs)"
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
@@ -52,10 +47,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
-# ── crate publish order ────────────────────────────────────────────────────────
-# Must follow dependency order — each crate must be on crates.io before the
-# next one can reference it as a registry dependency.
-ALL_CRATES=("koprs-derive" "koprs" "koprs-gen")
+ALL_CRATES=("koprs")
 
 if [[ -n "${SINGLE_CRATE}" ]]; then
   valid=false

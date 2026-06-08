@@ -15,7 +15,3 @@ kube-runtime = "1.1.0"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 schemars = "0.8"
-syn = { version = "2", features = ["full"] }
-quote = "1"
-proc-macro2 = "1"
-inventory = "0.3"
