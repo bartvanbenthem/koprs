@@ -81,12 +81,14 @@ and drives both with `tokio::try_join!`:
 ```rust
 let secretsync_controller = ControllerBuilder::new(secretsync_api)
     .health_port(8080)
+    .metrics_port(9090)
     .leader_election(operator_ns.clone(), "secretsync-operator-leader")
     .concurrency(4)
     .run(SecretSyncReconciler, secret_ctx);
 
 let serviceaccountsync_controller = ControllerBuilder::new(serviceaccountsync_api)
     .health_port(8081)
+    .metrics_port(9091)
     .leader_election(operator_ns, "serviceaccountsync-operator-leader")
     .concurrency(4)
     .run(ServiceAccountSyncReconciler, serviceaccount_ctx);
@@ -103,8 +105,9 @@ A few things worth noting about composing controllers this way:
   of *its own* kind in parallel, so concurrency happens both across and within
   controllers.
 - Operational features that bind shared resources need distinct values per
-  controller: each gets its own health port (`8080`/`8081`) and its own leader
-  lease name, so the two controllers can be elected leader independently.
+  controller: each gets its own health port (`8080`/`8081`), its own metrics
+  port (`9090`/`9091`), and its own leader lease name, so the two controllers
+  can be elected leader independently.
 - `tokio::try_join!` propagates the first error and cancels the other loop —
   the same fail-fast behavior a single `.run()` call would have. Use
   `tokio::join!` instead if controllers should keep running independently of

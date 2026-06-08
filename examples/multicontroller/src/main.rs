@@ -14,6 +14,8 @@
 //
 // Operational features (composed identically on both controllers):
 //   .health_port(...)      — GET /healthz + GET /readyz per controller (distinct ports)
+//   .metrics_port(...)     — GET /metrics per controller (distinct ports) — Prometheus
+//                            reconcile counts/errors/durations
 //   .graceful_shutdown()   — clean stop on SIGTERM / Ctrl+C
 //   .leader_election(...)  — Kubernetes Lease-based HA (distinct lease names)
 //   .reconcile_timeout(...) — kills and requeues reconciles stuck too long
@@ -62,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
 
     let secretsync_controller = ControllerBuilder::new(secretsync_api)
         .health_port(8080)
+        .metrics_port(9090)
         .graceful_shutdown()
         .leader_election(operator_ns.clone(), "secretsync-operator-leader")
         .reconcile_timeout(Duration::from_secs(300))
@@ -76,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
     let serviceaccountsync_controller = ControllerBuilder::new(serviceaccountsync_api)
         .health_port(8081)
+        .metrics_port(9091)
         .graceful_shutdown()
         .leader_election(operator_ns, "serviceaccountsync-operator-leader")
         .reconcile_timeout(Duration::from_secs(300))

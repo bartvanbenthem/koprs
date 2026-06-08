@@ -9,6 +9,7 @@
 //
 // Operational features:
 //   .health_port(8080)         — GET /healthz + GET /readyz for pod probes
+//   .metrics_port(9090)        — GET /metrics — Prometheus reconcile counts/errors/durations
 //   .graceful_shutdown()       — clean stop on SIGTERM / Ctrl+C
 //   .leader_election(...)      — Kubernetes Lease-based HA; only one replica reconciles
 //   .reconcile_timeout(300s)   — kills and requeues reconciles stuck longer than 5 minutes
@@ -67,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
             owner_label_mapper("configmapsync.example.io/owner"),
         )
         .health_port(8080)
+        .metrics_port(9090)
         .graceful_shutdown()
         .leader_election(operator_ns, "configmapsync-operator-leader")
         .reconcile_timeout(Duration::from_secs(300))
