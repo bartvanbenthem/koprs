@@ -1,9 +1,13 @@
-// src/reconciler.rs
+// src/serviceaccountsync.rs
+//
+// Reconciler for the ServiceAccountSync CRD — ensures a ServiceAccount with
+// the spec's image-pull secrets exists in the target namespace. Structurally
+// identical to the SecretSync reconciler; the two run as independent
+// controllers (see main.rs) so CRs of either kind are reconciled concurrently.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use k8s_openapi::api::core::v1::ConfigMap;
+use k8s_openapi::api::core::v1::{LocalObjectReference, ServiceAccount};
 use kube::ResourceExt;
 use tokio::time::Duration;
 use tracing::{error, info};
@@ -19,24 +23,20 @@ use koprs::resources::{EnsureOutcome, delete_resource, ensure_resource, patch_la
 use koprs::scope::Namespaced;
 use koprs::status::{make_condition, patch_status_namespaced, upsert_condition};
 
-use crate::types::{ConfigMapSync, ConfigMapSyncStatus};
+use crate::types::{ServiceAccountSync, ServiceAccountSyncStatus};
 
-const FINALIZER: &str = "configmapsync.example.io/cleanup";
-const FIELD_MANAGER: &str = "configmapsync-operator";
-const MANAGED_LABEL: &str = "app.kubernetes.io/managed-by=configmapsync-operator";
+const FINALIZER: &str = "multicontroller.example.io/serviceaccountsync-cleanup";
+const FIELD_MANAGER: &str = "multicontroller-serviceaccountsync";
+const MANAGED_LABEL: &str = "app.kubernetes.io/managed-by=multicontroller-serviceaccountsync";
 
-// ---------------------------------------------------------------------------
-// Reconciler
-// ---------------------------------------------------------------------------
+pub struct ServiceAccountSyncReconciler;
 
-pub struct ConfigMapSyncReconciler;
-
-impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
+impl Reconciler<ServiceAccountSync> for ServiceAccountSyncReconciler {
     type Error = KubeGenericError;
 
     async fn reconcile(
         &self,
-        cr: Arc<ConfigMapSync>,
+        cr: Arc<ServiceAccountSync>,
         ctx: Arc<Context>,
     ) -> Result<Action, KubeGenericError> {
         let client = ctx.client.clone();
@@ -45,7 +45,7 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
             .namespace()
             .ok_or(KubeGenericError::MissingMetadata("namespace".into()))?;
 
-        info!(cr = %name, ns = %namespace, "reconciling ConfigMapSync");
+        info!(cr = %name, ns = %namespace, "reconciling ServiceAccountSync");
 
         // -------------------------------------------------------------------
         // Deletion path
@@ -54,21 +54,29 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
             info!(cr = %name, "deletion timestamp set — running cleanup");
 
             let target_ns = &cr.spec.target_namespace;
-            let cm_name = configmap_name(&name);
+            let sa_name = service_account_name(&name);
 
-            match delete_resource::<ConfigMap, _>(client.clone(), Namespaced(target_ns), &cm_name)
-                .await
+            match delete_resource::<ServiceAccount, _>(
+                client.clone(),
+                Namespaced(target_ns),
+                &sa_name,
+            )
+            .await
             {
-                Ok(true) => info!(cm = %cm_name, ns = %target_ns, "deleted synced ConfigMap"),
-                Ok(false) => info!(cm = %cm_name, "ConfigMap was already gone"),
+                Ok(true) => info!(sa = %sa_name, ns = %target_ns, "deleted synced ServiceAccount"),
+                Ok(false) => info!(sa = %sa_name, "ServiceAccount was already gone"),
                 Err(e) => {
-                    error!(error = %e, "failed to delete ConfigMap during cleanup");
+                    error!(error = %e, "failed to delete ServiceAccount during cleanup");
                     return Err(e.into());
                 }
             }
 
-            remove_finalizers::<ConfigMapSync, _>(client.clone(), Namespaced(&namespace), &name)
-                .await?;
+            remove_finalizers::<ServiceAccountSync, _>(
+                client.clone(),
+                Namespaced(&namespace),
+                &name,
+            )
+            .await?;
             info!(cr = %name, "finalizer removed — deletion complete");
             return Ok(Action::await_change());
         }
@@ -78,31 +86,37 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
         // -------------------------------------------------------------------
 
         // 1. Ensure finalizer is present.
-        add_finalizer_namespaced::<ConfigMapSync>(client.clone(), &cr, FINALIZER).await?;
+        add_finalizer_namespaced::<ServiceAccountSync>(client.clone(), &cr, FINALIZER).await?;
 
-        // 2. Build and ensure the desired ConfigMap.
+        // 2. Build and ensure the desired ServiceAccount.
         let target_ns = &cr.spec.target_namespace;
-        let cm_name = configmap_name(&name);
-        let desired_cm = build_configmap(&cm_name, target_ns, &name, &cr.spec.data);
+        let sa_name = service_account_name(&name);
+        let desired_sa = build_service_account(
+            &sa_name,
+            target_ns,
+            &name,
+            cr.spec.automount_token,
+            &cr.spec.image_pull_secrets,
+        );
 
-        let outcome = ensure_resource::<ConfigMap, _>(
+        let outcome = ensure_resource::<ServiceAccount, _>(
             client.clone(),
             Namespaced(target_ns),
-            &desired_cm,
+            &desired_sa,
             FIELD_MANAGER,
         )
         .await?;
-        info!(cm = %cm_name, ns = %target_ns, "applied ConfigMap");
+        info!(sa = %sa_name, ns = %target_ns, "applied ServiceAccount");
 
         if outcome.was_changed() {
             let (reason, note) = match &outcome {
                 EnsureOutcome::Created(_) => (
-                    "ConfigMapCreated",
-                    format!("ConfigMap '{cm_name}' created in namespace '{target_ns}'"),
+                    "ServiceAccountCreated",
+                    format!("ServiceAccount '{sa_name}' created in namespace '{target_ns}'"),
                 ),
                 EnsureOutcome::Updated(_) => (
-                    "ConfigMapDriftCorrected",
-                    format!("ConfigMap '{cm_name}' corrected in namespace '{target_ns}'"),
+                    "ServiceAccountDriftCorrected",
+                    format!("ServiceAccount '{sa_name}' corrected in namespace '{target_ns}'"),
                 ),
                 EnsureOutcome::Unchanged(_) => unreachable!(),
             };
@@ -118,24 +132,28 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
             .await?;
         }
 
-        // 3. Garbage-collect stale ConfigMaps previously owned by this CR.
-        gc_resources::<ConfigMap, _>(client.clone(), Namespaced(target_ns), MANAGED_LABEL, |cm| {
-            cm.name_any() == cm_name
-        })
+        // 3. Garbage-collect stale ServiceAccounts previously owned by this CR.
+        gc_resources::<ServiceAccount, _>(
+            client.clone(),
+            Namespaced(target_ns),
+            MANAGED_LABEL,
+            |sa| sa.name_any() == sa_name,
+        )
         .await?;
 
         // 4. Stamp the target namespace as a label on the CR.
-        patch_labels::<ConfigMapSync, _>(
+        patch_labels::<ServiceAccountSync, _>(
             client.clone(),
             Namespaced(&namespace),
             &name,
-            &[("configmapsync.example.io/synced-to", target_ns)],
+            &[("multicontroller.example.io/synced-to", target_ns)],
         )
         .await?;
 
         // 5. Write the full status in one SSA patch.
         let generation = cr.metadata.generation;
-        let status_message = format!("ConfigMap '{cm_name}' synced to namespace '{target_ns}'");
+        let status_message =
+            format!("ServiceAccount '{sa_name}' synced to namespace '{target_ns}'");
 
         let mut conditions = cr
             .status
@@ -147,17 +165,17 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
             make_condition(
                 "Ready",
                 "True",
-                "ConfigMapSynced",
+                "ServiceAccountSynced",
                 &status_message,
                 generation,
             ),
         );
 
-        patch_status_namespaced::<ConfigMapSync, ConfigMapSyncStatus>(
+        patch_status_namespaced::<ServiceAccountSync, ServiceAccountSyncStatus>(
             client.clone(),
             &namespace,
             &name,
-            ConfigMapSyncStatus {
+            ServiceAccountSyncStatus {
                 ready: true,
                 message: status_message,
                 conditions,
@@ -172,7 +190,7 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
 
     fn error_policy(
         &self,
-        cr: Arc<ConfigMapSync>,
+        cr: Arc<ServiceAccountSync>,
         error: &KubeGenericError,
         _ctx: Arc<Context>,
     ) -> Action {
@@ -185,24 +203,34 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn configmap_name(cr_name: &str) -> String {
-    format!("cms-{cr_name}")
+fn service_account_name(cr_name: &str) -> String {
+    format!("sas-{cr_name}")
 }
 
-fn build_configmap(
+fn build_service_account(
     name: &str,
     namespace: &str,
     owner_cr: &str,
-    data: &BTreeMap<String, String>,
-) -> ConfigMap {
-    ConfigMap {
+    automount_token: bool,
+    image_pull_secrets: &[String],
+) -> ServiceAccount {
+    let refs: Vec<LocalObjectReference> = image_pull_secrets
+        .iter()
+        .map(|n| LocalObjectReference { name: n.clone() })
+        .collect();
+
+    ServiceAccount {
         metadata: ObjectMetaBuilder::new()
             .name(name)
             .namespace(namespace)
-            .label("app.kubernetes.io/managed-by", "configmapsync-operator")
-            .label("configmapsync.example.io/owner", owner_cr)
+            .label(
+                "app.kubernetes.io/managed-by",
+                "multicontroller-serviceaccountsync",
+            )
+            .label("multicontroller.example.io/owner", owner_cr)
             .build(),
-        data: Some(data.clone()),
+        automount_service_account_token: Some(automount_token),
+        image_pull_secrets: if refs.is_empty() { None } else { Some(refs) },
         ..Default::default()
     }
 }

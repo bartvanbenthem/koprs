@@ -6,6 +6,7 @@ mod events;
 mod finalizers;
 mod gc;
 mod meta;
+mod observability;
 mod owners;
 mod resources;
 mod scope;
