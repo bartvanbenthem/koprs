@@ -8,7 +8,7 @@ The Koprs crate for Rust is a framework that uses [`kube`](https://github.com/ku
 
 This repository contains the core framework and example operators.
 
-## Crates
+## Crate
 
 | Crate | Description | Docs |
 |-------|-------------|------|
