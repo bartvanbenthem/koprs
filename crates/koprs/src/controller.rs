@@ -58,6 +58,7 @@ use kube::Client;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{KubeGenericError, Result};
+use crate::observability::{Metrics, serve_metrics};
 use crate::traits::KubeResource;
 
 // ---------------------------------------------------------------------------
@@ -502,6 +503,7 @@ where
     pub(crate) watcher_config: watcher::Config,
     pub(crate) configure: Option<ConfigureFn<CR>>,
     pub(crate) health_port: Option<u16>,
+    pub(crate) metrics_port: Option<u16>,
     pub(crate) graceful_shutdown: bool,
     pub(crate) reconcile_timeout: Option<Duration>,
     pub(crate) leader_election: Option<LeaderElectionConfig>,
@@ -525,6 +527,7 @@ where
             watcher_config: watcher::Config::default(),
             configure: None,
             health_port: None,
+            metrics_port: None,
             graceful_shutdown: false,
             reconcile_timeout: None,
             leader_election: None,
@@ -542,6 +545,20 @@ where
     /// an error before the controller loop starts.
     pub fn health_port(mut self, port: u16) -> Self {
         self.health_port = Some(port);
+        self
+    }
+
+    /// Start a Prometheus metrics server on `0.0.0.0:<port>`.
+    ///
+    /// `GET /metrics` returns reconcile counts, error counts (by kind and
+    /// error), and reconcile duration histograms in Prometheus text
+    /// exposition format. Recording happens automatically around every
+    /// reconcile — see [`Metrics`] for the full list of collectors.
+    ///
+    /// If the port is already in use, [`run`](ControllerBuilder::run) returns
+    /// an error before the controller loop starts.
+    pub fn metrics_port(mut self, port: u16) -> Self {
+        self.metrics_port = Some(port);
         self
     }
 
@@ -785,6 +802,18 @@ where
             tokio::spawn(serve_health(listener, ready.clone()));
         }
 
+        // --- Metrics ---
+        let metrics = if let Some(port) = self.metrics_port {
+            let registry = prometheus::Registry::new();
+            let metrics = Arc::new(Metrics::new_registered(&registry)?);
+            let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+            info!(port, "Metrics server listening");
+            tokio::spawn(serve_metrics(listener, registry));
+            Some(metrics)
+        } else {
+            None
+        };
+
         // --- Stop signal channel (shared by shutdown + lease loss) ---
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let has_stop = self.graceful_shutdown || self.leader_election.is_some();
@@ -822,13 +851,17 @@ where
         let error_policy_r = reconciler.clone();
         let ready_ref = ready.clone();
         let reconcile_timeout = self.reconcile_timeout;
+        let kind_owned = kind.to_string();
 
         let run_loop = ctl
             .run(
                 move |cr, ctx| {
                     let r = reconciler.clone();
+                    let metrics = metrics.clone();
+                    let kind = kind_owned.clone();
                     async move {
-                        if let Some(t) = reconcile_timeout {
+                        let started = std::time::Instant::now();
+                        let result = if let Some(t) = reconcile_timeout {
                             match tokio::time::timeout(t, r.reconcile(cr, ctx)).await {
                                 Ok(result) => result,
                                 Err(_) => {
@@ -838,7 +871,16 @@ where
                             }
                         } else {
                             r.reconcile(cr, ctx).await
+                        };
+                        if let Some(m) = &metrics {
+                            match &result {
+                                Ok(_) => m.record_success(&kind, started.elapsed()),
+                                Err(e) => {
+                                    m.record_failure(&kind, &e.to_string(), started.elapsed())
+                                }
+                            }
                         }
+                        result
                     }
                 },
                 move |cr, err, ctx| error_policy_r.error_policy(cr, err, ctx),

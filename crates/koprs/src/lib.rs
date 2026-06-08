@@ -36,6 +36,7 @@ pub mod events;
 pub mod finalizers;
 pub mod gc;
 pub mod meta;
+pub mod observability;
 pub mod owners;
 pub mod resources;
 pub mod scope;
