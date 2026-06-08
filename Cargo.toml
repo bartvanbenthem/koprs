@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/*", "examples/configmapsync"]
+members = ["crates/*", "examples/configmapsync", "examples/multicontroller"]
 resolver = "2"
 
 [workspace.package]

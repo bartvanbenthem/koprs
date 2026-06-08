@@ -1,0 +1,25 @@
+# manifests/example-cr.yaml
+#
+# Example CRs for both controllers managed by this operator.
+# Apply with: kubectl apply -f manifests/example-cr.yaml
+apiVersion: example.io/v1alpha1
+kind: SecretSync
+metadata:
+  name: db-credentials
+  namespace: default
+spec:
+  targetNamespace: production
+  stringData:
+    username: app-user
+    password: change-me
+---
+apiVersion: example.io/v1alpha1
+kind: ServiceAccountSync
+metadata:
+  name: app-runner
+  namespace: default
+spec:
+  targetNamespace: production
+  automountToken: false
+  imagePullSecrets:
+    - regcred
