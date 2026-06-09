@@ -10,7 +10,7 @@ This repository contains the core framework and example operators.
 
 | Crate | Description | Docs |
 |-------|-------------|------|
-| [`koprs`](./crates/koprs) ([README](./crates/koprs/README.md)) | Core generic runtime framework | [![docs.rs](https://img.shields.io/docsrs/koprs)](https://docs.rs/koprs) [![crates.io](https://img.shields.io/crates/v/koprs)](https://crates.io/crates/koprs) |
+| [`koprs`](./crates/koprs) | Core generic runtime framework | [![docs.rs](https://img.shields.io/docsrs/koprs)](https://docs.rs/koprs) [![crates.io](https://img.shields.io/crates/v/koprs)](https://crates.io/crates/koprs) |
 
 ## Workspace layout
 
