@@ -805,7 +805,7 @@ where
         // --- Metrics ---
         let metrics = if let Some(port) = self.metrics_port {
             let registry = prometheus::Registry::new();
-            let metrics = Arc::new(Metrics::new_registered(&registry)?);
+            let metrics = Arc::new(Metrics::new_registered("", &registry)?);
             let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
             info!(port, "Metrics server listening");
             tokio::spawn(serve_metrics(listener, registry));

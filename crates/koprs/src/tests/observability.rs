@@ -15,7 +15,7 @@ mod observability_tests {
     #[test]
     fn new_registered_registers_all_collectors() {
         let registry = Registry::new();
-        let metrics = Metrics::new_registered(&registry).expect("registration succeeds");
+        let metrics = Metrics::new_registered("", &registry).expect("registration succeeds");
 
         // Vec-based collectors only appear in `gather()` once a label
         // combination has been observed at least once.
@@ -28,56 +28,53 @@ mod observability_tests {
             .map(|mf| mf.name().to_string())
             .collect();
 
-        assert!(names.contains(&"koprs_reconciliations_total".to_string()));
-        assert!(names.contains(&"koprs_reconcile_errors_total".to_string()));
-        assert!(names.contains(&"koprs_reconcile_duration_seconds".to_string()));
+        assert!(names.contains(&"reconciliations_total".to_string()));
+        assert!(names.contains(&"reconcile_errors_total".to_string()));
+        assert!(names.contains(&"reconcile_duration_seconds".to_string()));
     }
 
     #[test]
     fn registering_twice_fails() {
         let registry = Registry::new();
-        Metrics::new_registered(&registry).expect("first registration succeeds");
-        let err = Metrics::new_registered(&registry).expect_err("duplicate registration fails");
+        Metrics::new_registered("", &registry).expect("first registration succeeds");
+        let err = Metrics::new_registered("", &registry).expect_err("duplicate registration fails");
         assert!(matches!(err, crate::error::KubeGenericError::Internal(_)));
     }
 
     #[test]
     fn record_success_increments_total_but_not_errors() {
         let registry = Registry::new();
-        let metrics = Metrics::new_registered(&registry).unwrap();
+        let metrics = Metrics::new_registered("", &registry).unwrap();
 
         metrics.record_success("ConfigMap", Duration::from_millis(5));
         metrics.record_success("ConfigMap", Duration::from_millis(5));
 
         let output = render(&registry).unwrap();
-        assert!(output.contains("koprs_reconciliations_total 2"));
-        assert!(!output.contains("koprs_reconcile_errors_total"));
+        assert!(output.contains("reconciliations_total 2"));
+        assert!(!output.contains("reconcile_errors_total"));
     }
 
     #[test]
     fn record_failure_increments_total_and_labelled_error_counter() {
         let registry = Registry::new();
-        let metrics = Metrics::new_registered(&registry).unwrap();
+        let metrics = Metrics::new_registered("", &registry).unwrap();
 
         metrics.record_failure("ConfigMap", "not found", Duration::from_millis(1));
 
         let output = render(&registry).unwrap();
-        assert!(output.contains("koprs_reconciliations_total 1"));
-        assert!(
-            output
-                .contains(r#"koprs_reconcile_errors_total{error="not found",kind="ConfigMap"} 1"#)
-        );
+        assert!(output.contains("reconciliations_total 1"));
+        assert!(output.contains(r#"reconcile_errors_total{error="not found",kind="ConfigMap"} 1"#));
     }
 
     #[test]
     fn render_includes_duration_histogram_for_recorded_kind() {
         let registry = Registry::new();
-        let metrics = Metrics::new_registered(&registry).unwrap();
+        let metrics = Metrics::new_registered("", &registry).unwrap();
 
         metrics.record_success("ConfigMap", Duration::from_millis(100));
 
         let output = render(&registry).unwrap();
-        assert!(output.contains("koprs_reconcile_duration_seconds_count{kind=\"ConfigMap\"} 1"));
+        assert!(output.contains("reconcile_duration_seconds_count{kind=\"ConfigMap\"} 1"));
     }
 
     #[test]
@@ -114,7 +111,7 @@ mod observability_tests {
     #[tokio::test]
     async fn metrics_endpoint_returns_200_and_renders_registry() {
         let registry = Registry::new();
-        let metrics = Metrics::new_registered(&registry).unwrap();
+        let metrics = Metrics::new_registered("", &registry).unwrap();
         metrics.record_success("ConfigMap", Duration::from_millis(20));
 
         let port = start_metrics_server(registry).await;
@@ -122,7 +119,7 @@ mod observability_tests {
 
         assert!(resp.starts_with("HTTP/1.1 200 OK"), "got: {resp}");
         assert!(
-            resp.contains("koprs_reconciliations_total 1"),
+            resp.contains("reconciliations_total 1"),
             "expected metric in body, got: {resp}"
         );
     }
