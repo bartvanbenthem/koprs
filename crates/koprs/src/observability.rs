@@ -50,13 +50,14 @@ use crate::error::{KubeGenericError, Result};
 ///
 /// | Metric | Type | Labels | Meaning |
 /// |--------|------|--------|---------|
-/// | `koprs_reconciliations_total` | counter | — | Reconciles completed, success or failure |
-/// | `koprs_reconcile_errors_total` | counter | `kind`, `error` | Failed reconciles, by resource kind and error |
-/// | `koprs_reconcile_duration_seconds` | histogram | `kind` | Reconcile latency, by resource kind |
+/// | `{namespace_}reconciliations_total` | counter | — | Reconciles completed, success or failure |
+/// | `{namespace_}reconcile_errors_total` | counter | `kind`, `error` | Failed reconciles, by resource kind and error |
+/// | `{namespace_}reconcile_duration_seconds` | histogram | `kind` | Reconcile latency, by resource kind |
 ///
-/// Construct with [`Metrics::new`] and register with a [`Registry`] via
-/// [`Metrics::register`] — or use [`Metrics::new_registered`] to do both at
-/// once. [`ControllerBuilder`][crate::controller::ControllerBuilder] does this
+/// The `namespace` prefix (e.g. `"myoperator"`) is set in [`Metrics::new`] and
+/// produces metric names like `myoperator_reconciliations_total`. Pass `""` for
+/// no prefix. Construct and register in one step with [`Metrics::new_registered`].
+/// [`ControllerBuilder`][crate::controller::ControllerBuilder] does this
 /// for you when `.metrics_port()` is set.
 #[derive(Clone, Debug)]
 pub struct Metrics {
@@ -67,27 +68,36 @@ pub struct Metrics {
 
 impl Metrics {
     /// Create the collectors without registering them.
-    pub fn new() -> Self {
-        let reconciliations = IntCounter::new(
-            "koprs_reconciliations_total",
-            "Total number of reconciles completed",
+    ///
+    /// `namespace` is prepended to every metric name with an underscore separator
+    /// (e.g. `"myoperator"` → `myoperator_reconciliations_total`). Pass `""` for
+    /// no prefix.
+    pub fn new(namespace: &str) -> Self {
+        let reconciliations = IntCounter::with_opts(
+            Opts::new(
+                "reconciliations_total",
+                "Total number of reconciles completed",
+            )
+            .namespace(namespace),
         )
         .expect("static metric options are valid");
 
         let errors = IntCounterVec::new(
             Opts::new(
-                "koprs_reconcile_errors_total",
+                "reconcile_errors_total",
                 "Total number of failed reconciles",
-            ),
+            )
+            .namespace(namespace),
             &["kind", "error"],
         )
         .expect("static metric options are valid");
 
         let reconcile_duration = HistogramVec::new(
             prometheus::HistogramOpts::new(
-                "koprs_reconcile_duration_seconds",
+                "reconcile_duration_seconds",
                 "Reconcile latency in seconds",
             )
+            .namespace(namespace)
             .buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 15.0, 60.0]),
             &["kind"],
         )
@@ -118,8 +128,10 @@ impl Metrics {
     }
 
     /// Create the collectors and register them with `registry` in one step.
-    pub fn new_registered(registry: &Registry) -> Result<Self> {
-        Self::new().register(registry)
+    ///
+    /// See [`Metrics::new`] for the meaning of `namespace`.
+    pub fn new_registered(namespace: &str, registry: &Registry) -> Result<Self> {
+        Self::new(namespace).register(registry)
     }
 
     /// Record a successful reconcile of `kind` that took `duration`.
@@ -143,7 +155,7 @@ impl Metrics {
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self::new()
+        Self::new("")
     }
 }
 
