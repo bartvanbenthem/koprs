@@ -906,7 +906,7 @@ dependencies = [
 
 [[package]]
 name = "koprs"
-version = "0.9.7"
+version = "0.9.9"
 dependencies = [
  "axum",
  "bytes",
