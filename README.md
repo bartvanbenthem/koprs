@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 For finalizers, owned-resource reconciliation, garbage collection, events, and leader
-election, see the [configmapsync operator](./examples/configmapsync/README.md) — it
+election, see the [configmapsync operator](./examples/configmapsync/README.md), it
 walks through the same building blocks in a complete, runnable operator. To see how to
 run several CRDs and controllers from a single operator binary, see
 [multicontroller](./examples/multicontroller/README.md).
