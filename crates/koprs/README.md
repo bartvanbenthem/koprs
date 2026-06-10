@@ -54,7 +54,7 @@ A reusable, ergonomic library that eliminates Kubernetes operator boilerplate by
 - **`Reconciler` trait** — implement `reconcile` for your CRD; `error_policy` defaults to requeue after 30 s
 - **`ControllerBuilder`** — one fluent builder that wires the reconcile loop; all methods are optional and composable:
 
-The three pieces fit together: implement `Reconciler` to define your business logic, construct a `Context` to carry the shared Kubernetes client (and any extra state your reconciler needs), then pass both to `ControllerBuilder::run()`. `run()` is the terminal call that starts the event loop and blocks until the controller stops. The methods below are all optional — chain the ones you need before calling `run()`:
+The three pieces fit together: implement `Reconciler` to define your business logic, construct a `Context` to carry the shared Kubernetes client (and any extra state your reconciler needs), then pass both to `ControllerBuilder::run()`. `run()` is the terminal call that starts the event loop and blocks until the controller stops. The methods below are all optional, chain the ones you need before calling `run()`:
 
 | Method | What it provides |
 |--------|-----------------|
