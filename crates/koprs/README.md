@@ -33,18 +33,18 @@ A reusable, ergonomic library that eliminates Kubernetes operator boilerplate by
 
 | Area | koprs | plain kube / kube-runtime |
 |---|---|---|
-| **Controller bootstrap** | `ControllerBuilder` — health probes, leader election, graceful shutdown, timeouts, concurrency, secondary watches, all composable | Raw `Controller::new().run(...)` stream, no operational skeleton |
-| **Apply / ensure** | `apply_resource`, `ensure_resource` (SSA), `EnsureOutcome<T>` (Created / Updated / Unchanged) | `api.patch()` — caller builds every `PatchParams` and branches on 404 manually |
-| **Status patching** | `patch_status_namespaced` / cluster variants; `KoprsCondition` derives `JsonSchema` for direct CRD embedding | `api.patch_status()` exists; no ready-made condition type with `JsonSchema` |
-| **Finalizers** | `add_finalizer` / `remove_finalizers` — idempotent merge-patch, no-op if already present/absent | No helpers; callers patch the finalizer list themselves |
-| **Garbage collection** | `gc_resources` — list by label selector, delete orphans, clear finalizers on stuck-terminating resources | Not provided |
-| **Event recording** | `record_event` with `EventType::Normal` / `Warning` | Not provided |
-| **Owner references** | `owner_ref`, `controller_ref`, `set_owner_refs`; `make_object_ref_mapper`, `owner_label_mapper` for cross-resource reconcile triggers | `OwnerReference` struct exists; no builder or mapper helpers |
-| **Scope markers** | `Cluster` / `Namespaced` compile-time markers resolve to the right `Api` constructor | Callers choose `Api::all` vs `Api::namespaced` at every call site |
-| **Metadata builder** | Fluent `ObjectMetaBuilder` | `ObjectMeta { name: Some(...), labels: Some(BTreeMap::from([...])), ..Default::default() }` |
-| **Watcher abstraction** | `watch` (signal), `watch_objects` (resource data), `watch_events` (applied + deleted) — mpsc channels, backoff, tracing included | Raw `watcher()` stream; callers wire mpsc, backoff, and error handling themselves |
-| **Generic bounds** | `KubeResource` blanket trait collapses `Clone + Debug + Resource<DynamicType=()> + DeserializeOwned + Serialize + Send + Sync + 'static` to one name | Full bound wall on every generic function |
-| **Error type** | `KubeGenericError` unifies `kube::Error`, `serde_json::Error`, `io::Error`, and internal errors | Each operator defines its own error type |
+| **Controller bootstrap** | A ready-made controller skeleton: health probes, leader election, graceful shutdown, timeouts, and concurrency are all wired up out of the box | You get a bare event loop — every operational concern is yours to implement |
+| **Apply / ensure** | Apply a resource and get back a clear signal: was it created, updated, or already in the desired state? | You patch the resource yourself and manually handle the case where it doesn't exist yet |
+| **Status patching** | Update a resource's status in one call; includes a built-in condition type ready to embed in your CRD schema | The low-level patch call exists, but you define and manage your own condition structure |
+| **Finalizers** | Add or remove finalizers safely, repeated calls are harmless | No helpers; you manage the finalizer list yourself and guard against duplicates |
+| **Garbage collection** | Find child resources by label and delete the ones that no longer have an owner, including resources stuck in termination | Not provided |
+| **Event recording** | Emit a Kubernetes event (normal or warning) in a single call | Not provided |
+| **Owner references** | Helpers to attach ownership between resources and to trigger reconciliation when a child changes | The data type exists, but there are no builders or cross-resource trigger helpers |
+| **Scope markers** | Declare at compile time whether a resource is cluster-scoped or namespace-scoped; the right API client is selected automatically | You choose the right API client at every call site |
+| **Metadata builder** | Build resource metadata fluently with a chainable builder | You construct the metadata struct by hand, spelling out every optional field |
+| **Watcher abstraction** | Subscribe to resource changes via channels, with retries and tracing included | You get a raw stream and wire up channels, retry logic, and error handling yourself |
+| **Generic bounds** | One short trait name covers the full set of constraints a Kubernetes resource type must satisfy | Every generic function repeats the same long list of type constraints |
+| **Error type** | A single error type covers Kubernetes, serialization, and I/O errors | Each operator defines and maintains its own error type |
 
 ---
 
