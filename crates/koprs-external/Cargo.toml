@@ -1,0 +1,42 @@
+[package]
+name = "koprs-external"
+version = "0.9.8"
+edition = "2024"
+description = "Generic polling watchers for external sources such as HTTP APIs and object stores, designed as a companion to koprs Kubernetes operators."
+license = "MIT"
+repository = "https://github.com/bartvanbenthem/koprs"
+readme = "README.md"
+keywords = ["kubernetes", "operator", "watcher", "http", "polling"]
+categories = ["web-programming", "asynchronous"]
+
+[lib]
+name = "koprs_external"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1"
+futures = "0.3"
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tracing = "0.1"
+
+[dependencies.object_store]
+version = "0.11"
+optional = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+kube = { version = "1.1.0", default-features = true, features = ["derive", "runtime"] }
+k8s-openapi = { version = "0.25.0", default-features = false, features = ["v1_33"] }
+
+[features]
+default = []
+object-store = ["dep:object_store"]
+integration = []
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["integration"]
