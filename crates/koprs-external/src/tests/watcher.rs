@@ -17,8 +17,9 @@ mod watcher_tests {
     use tokio::time::timeout;
 
     use crate::error::{ExternalError, Result};
-    use crate::watcher::{ExternalEvent, ExternalSource, WatchConfig, watch_external,
-        watch_external_with_config};
+    use crate::watcher::{
+        ExternalEvent, ExternalSource, WatchConfig, watch_external, watch_external_with_config,
+    };
 
     // -----------------------------------------------------------------------
     // SequenceSource — yields a fixed set of events then goes quiet
@@ -123,8 +124,8 @@ mod watcher_tests {
 
     #[test]
     fn watch_config_with_max_backoff_overrides_default() {
-        let config = WatchConfig::new(Duration::from_secs(30))
-            .with_max_backoff(Duration::from_secs(600));
+        let config =
+            WatchConfig::new(Duration::from_secs(30)).with_max_backoff(Duration::from_secs(600));
         assert_eq!(config.max_backoff, Duration::from_secs(600));
     }
 
@@ -211,7 +212,9 @@ mod watcher_tests {
     async fn watch_external_recovers_after_consecutive_errors() {
         // Fails 3 times then succeeds; all waits are 1–8 ms so recovery
         // arrives well within the 2-second timeout.
-        let source = FlakySource { failures_remaining: 3 };
+        let source = FlakySource {
+            failures_remaining: 3,
+        };
         let (tx, mut rx) = mpsc::channel(16);
         let _handle = watch_external(source, Duration::from_millis(1), tx);
 
@@ -225,7 +228,9 @@ mod watcher_tests {
 
     #[tokio::test]
     async fn watch_external_does_not_stop_on_errors() {
-        let source = FlakySource { failures_remaining: 5 };
+        let source = FlakySource {
+            failures_remaining: 5,
+        };
         let (tx, mut rx) = mpsc::channel(16);
         let _handle = watch_external(source, Duration::from_millis(1), tx);
 
@@ -239,9 +244,11 @@ mod watcher_tests {
 
     #[tokio::test]
     async fn watch_external_with_config_recovers_after_errors() {
-        let source = FlakySource { failures_remaining: 2 };
-        let config = WatchConfig::new(Duration::from_millis(1))
-            .with_max_backoff(Duration::from_millis(10));
+        let source = FlakySource {
+            failures_remaining: 2,
+        };
+        let config =
+            WatchConfig::new(Duration::from_millis(1)).with_max_backoff(Duration::from_millis(10));
         let (tx, mut rx) = mpsc::channel(16);
         let _handle = watch_external_with_config(source, config, tx);
 
