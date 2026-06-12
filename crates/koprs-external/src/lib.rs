@@ -56,7 +56,7 @@ pub mod watcher;
 pub mod store;
 
 pub use error::ExternalError;
-pub use watcher::{ExternalEvent, watch_external};
+pub use watcher::{ExternalEvent, WatchConfig, watch_external, watch_external_with_config};
 
 #[cfg(test)]
 mod tests;

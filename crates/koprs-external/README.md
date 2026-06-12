@@ -2,7 +2,7 @@
 
 Generic polling watchers for external sources such as HTTP REST APIs and object stores, designed as a companion to [`koprs`](../koprs) Kubernetes operators.
 
-Kubernetes operators often need to reconcile cluster state with resources that live outside the cluster — a remote configuration endpoint, an object store, or a third-party API. `koprs-external` provides a lightweight polling abstraction that fits naturally alongside `koprs` controllers, using the same channel-based pattern as `koprs::watcher`.
+Kubernetes operators often need to reconcile cluster state with resources that live outside the cluster, a remote configuration endpoint, an object store, or a third-party API. `koprs-external` provides a lightweight polling abstraction that fits naturally alongside `koprs` controllers, using the same channel-based pattern as `koprs::watcher`.
 
 
 ## Architecture Overview
@@ -10,10 +10,10 @@ Kubernetes operators often need to reconcile cluster state with resources that l
 `koprs-external` sits alongside your operator and bridges external HTTP or object-store sources into the same `mpsc` channel model used by `koprs::watcher`.
 
 ```bash
-+-------------------------------------------------------+
-|                 Your Operator App                     |
-|  (Reconcile Kubernetes state from external sources)   |
-+-------------------------------------------------------+
++------------------------------------------------------+
+|                 Your Operator App                    |
+|  (Reconcile Kubernetes state from external sources)  |
++------------------------------------------------------+
           |                            |
           v                            v
 +------------------+       +---------------------------+
@@ -25,8 +25,7 @@ Kubernetes operators often need to reconcile cluster state with resources that l
           v                            v
 +------------------+       +---------------------------+
 |    kube-rs       |       |  reqwest / object_store   |
-+------------------+       |  (S3, GCS, Azure, local)  |
-                            +---------------------------+
++------------------+       +---------------------------+
 ```
 
 ---
@@ -40,7 +39,7 @@ Kubernetes operators often need to reconcile cluster state with resources that l
 | **Event model** | `ExternalEvent<T>` with `Added`, `Modified`, `Removed` variants — same shape as `koprs::WatchEvent` | You define and maintain your own event type |
 | **Authentication** | Bearer token and arbitrary request headers via fluent builder | You build headers on every request |
 | **Object store support** | ETag-based diffing over any `object_store`-compatible backend — S3, GCS, Azure, local, HTTP, in-memory (feature-gated) | You call the list API and diff the results yourself |
-| **Error handling** | Poll errors are logged and retried automatically; the watcher never stops on a transient failure | You decide whether to panic, log, or back off |
+| **Error handling** | Transparent exponential backoff on consecutive poll failures — wait doubles from `interval` up to `max_backoff`, resets on success | You decide whether to panic, log, or back off |
 | **Tracing** | All poll activity and errors are emitted as structured `tracing` spans | You wire up logging yourself |
 
 ---
@@ -61,7 +60,7 @@ Kubernetes operators often need to reconcile cluster state with resources that l
 
 | Module | Description |
 |---|---|
-| `watcher` | `ExternalSource` trait, `ExternalEvent<T>` enum, `watch_external` spawner |
+| `watcher` | `ExternalSource` trait, `ExternalEvent<T>` enum, `WatchConfig`, `watch_external` / `watch_external_with_config` spawners |
 | `http` | `HttpPoller` — polls a single HTTP endpoint; ETag / `Last-Modified` change detection |
 | `store` | `ObjectStorePoller` — lists and diffs any `object_store` backend (requires `object-store` feature) |
 | `error` | `ExternalError` enum |
@@ -77,7 +76,7 @@ koprs-external = { path = "../koprs-external" }
 # koprs-external = "<version>"
 
 # Optional S3 support
-# koprs-external = { version = "<version>", features = ["s3"] }
+# koprs-external = { version = "<version>", features = ["object-store"] }
 ```
 
 ---
@@ -113,6 +112,38 @@ async fn main() {
     }
 }
 ```
+
+### Backoff — custom retry ceiling
+
+`watch_external` uses `WatchConfig::new(interval)` with `max_backoff = interval × 32`. Use
+`watch_external_with_config` when you need a specific ceiling — for example, capping retries
+at 5 minutes regardless of how large the base interval is:
+
+```rust
+use std::time::Duration;
+use koprs_external::http::HttpPoller;
+use koprs_external::watcher::{WatchConfig, watch_external_with_config, ExternalEvent};
+use tokio::sync::mpsc;
+
+#[tokio::main]
+async fn main() {
+    let (tx, mut rx) = mpsc::channel(16);
+
+    let poller = HttpPoller::new("https://api.example.com/config");
+    let config = WatchConfig::new(Duration::from_secs(30))
+        .with_max_backoff(Duration::from_secs(300)); // cap at 5 min
+
+    let _handle = watch_external_with_config(poller, config, tx);
+
+    while let Some(event) = rx.recv().await {
+        println!("{event:?}");
+    }
+}
+```
+
+On the first error the retry wait is `30 s × 2 = 60 s`. Each subsequent failure
+doubles it until it reaches the 5-minute cap. A successful poll resets the wait
+back to the base `30 s`.
 
 ### HTTP API — custom TLS (e.g. Kubernetes API server)
 
@@ -214,7 +245,6 @@ let store = Arc::new(GoogleCloudStorageBuilder::from_env().with_bucket_name("my-
 use object_store::local::LocalFileSystem;
 let store = Arc::new(LocalFileSystem::new_with_prefix("/data/configs").unwrap());
 ```
-```
 
 ---
 
@@ -222,10 +252,13 @@ let store = Arc::new(LocalFileSystem::new_with_prefix("/data/configs").unwrap())
 
 ### Unit tests
 
-Unit tests use an in-process axum HTTP server — no external services required.
+Unit tests use an in-process axum HTTP server and the `object_store::memory::InMemory`
+backend — no external services required. Backoff behaviour is covered by dedicated
+tests that use a `FlakySource` which fails a configurable number of times then recovers.
 
 ```bash
 cargo test -p koprs-external
+cargo test -p koprs-external --features object-store
 ```
 
 ### Integration tests

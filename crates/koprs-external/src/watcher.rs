@@ -4,7 +4,7 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio::time;
+use tokio::time::sleep;
 use tracing::{info, warn};
 
 use crate::error::Result;
@@ -78,17 +78,159 @@ pub trait ExternalSource: Send + 'static {
 }
 
 // ---------------------------------------------------------------------------
-// watch_external
+// WatchConfig
 // ---------------------------------------------------------------------------
 
-/// Spawn a background task that polls `source` on every `interval` tick and
+/// Configuration for [`watch_external_with_config`].
+///
+/// Controls the base polling interval and the ceiling applied during
+/// exponential backoff when consecutive poll failures occur.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use koprs_external::watcher::WatchConfig;
+///
+/// // Poll every 30 s; back off up to 10 min on errors.
+/// let config = WatchConfig::new(Duration::from_secs(30))
+///     .with_max_backoff(Duration::from_secs(600));
+/// ```
+#[derive(Debug, Clone)]
+pub struct WatchConfig {
+    /// Base polling interval used after a successful poll.
+    pub interval: Duration,
+    /// Maximum wait during backoff (default: `interval × 32`).
+    pub max_backoff: Duration,
+}
+
+impl WatchConfig {
+    /// Create a new configuration with the given base interval.
+    ///
+    /// `max_backoff` defaults to `interval × 32` (five doublings from the
+    /// base). Override with [`with_max_backoff`][Self::with_max_backoff].
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            max_backoff: interval.saturating_mul(32),
+            interval,
+        }
+    }
+
+    /// Set an explicit upper bound for backoff waits.
+    pub fn with_max_backoff(mut self, max_backoff: Duration) -> Self {
+        self.max_backoff = max_backoff;
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+fn backoff_wait(base: Duration, consecutive_errors: u32, max: Duration) -> Duration {
+    // 2^min(n, 30) keeps the shift within u32; saturating_mul caps at u64::MAX.
+    let factor = 1u32
+        .checked_shl(consecutive_errors.min(30))
+        .unwrap_or(u32::MAX);
+    base.saturating_mul(factor).min(max)
+}
+
+// ---------------------------------------------------------------------------
+// watch_external_with_config
+// ---------------------------------------------------------------------------
+
+/// Spawn a background task that polls `source` according to `config` and
 /// forwards each [`ExternalEvent`] to `tx`.
+///
+/// **Exponential backoff**: consecutive poll failures increase the retry wait
+/// exponentially — starting at `config.interval`, doubling each time, capped
+/// at `config.max_backoff`. The wait resets to `config.interval` on the next
+/// successful poll.
 ///
 /// The task shuts down automatically when all receivers are dropped or when
 /// the returned [`JoinHandle`] is aborted.
 ///
-/// Poll errors are logged as warnings and do not stop the watcher; the next
-/// tick triggers a fresh poll attempt.
+/// # Examples
+///
+/// ```no_run
+/// use std::time::Duration;
+/// use koprs_external::watcher::{WatchConfig, watch_external_with_config, ExternalSource};
+/// use tokio::sync::mpsc;
+///
+/// # async fn example<S: ExternalSource>(source: S) {
+/// let config = WatchConfig::new(Duration::from_secs(30))
+///     .with_max_backoff(Duration::from_secs(300));
+/// let (tx, mut rx) = mpsc::channel(16);
+/// let _handle = watch_external_with_config(source, config, tx);
+///
+/// while let Some(event) = rx.recv().await {
+///     println!("event: {:?}", event);
+/// }
+/// # }
+/// ```
+pub fn watch_external_with_config<S>(
+    source: S,
+    config: WatchConfig,
+    tx: mpsc::Sender<ExternalEvent<S::Item>>,
+) -> JoinHandle<()>
+where
+    S: ExternalSource,
+{
+    tokio::task::spawn(async move {
+        let mut source = source;
+        let name = source.name().to_owned();
+        let mut consecutive_errors: u32 = 0;
+
+        info!(source = %name, "External watcher started");
+
+        loop {
+            match source.poll().await {
+                Ok(events) => {
+                    consecutive_errors = 0;
+                    for event in events {
+                        if tx.send(event).await.is_err() {
+                            info!(source = %name, "Receiver dropped; stopping external watcher");
+                            return;
+                        }
+                    }
+                    sleep(config.interval).await;
+                }
+                Err(e) => {
+                    consecutive_errors = consecutive_errors.saturating_add(1);
+                    let wait =
+                        backoff_wait(config.interval, consecutive_errors, config.max_backoff);
+                    warn!(
+                        source = %name,
+                        error = %e,
+                        attempt = consecutive_errors,
+                        ?wait,
+                        "Poll failed; retrying after backoff"
+                    );
+                    sleep(wait).await;
+                }
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// watch_external  (convenience wrapper)
+// ---------------------------------------------------------------------------
+
+/// Spawn a background task that polls `source` every `interval` and forwards
+/// each [`ExternalEvent`] to `tx`.
+///
+/// This is a convenience wrapper around [`watch_external_with_config`] using
+/// [`WatchConfig::new`] with default backoff settings (`max_backoff =
+/// interval × 32`). Call [`watch_external_with_config`] directly to set a
+/// custom ceiling.
+///
+/// **Exponential backoff**: on consecutive poll errors the retry wait doubles
+/// starting from `interval`, capped at `interval × 32`. It resets to
+/// `interval` on the next success.
+///
+/// The task shuts down automatically when all receivers are dropped or when
+/// the returned [`JoinHandle`] is aborted.
 ///
 /// # Examples
 ///
@@ -114,29 +256,5 @@ pub fn watch_external<S>(
 where
     S: ExternalSource,
 {
-    tokio::task::spawn(async move {
-        let mut source = source;
-        let name = source.name().to_owned();
-        let mut ticker = time::interval(interval);
-        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-
-        info!(source = %name, "External watcher started");
-
-        loop {
-            ticker.tick().await;
-            match source.poll().await {
-                Ok(events) => {
-                    for event in events {
-                        if tx.send(event).await.is_err() {
-                            info!(source = %name, "Receiver dropped; stopping external watcher");
-                            return;
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(source = %name, error = %e, "Poll failed; retrying on next tick");
-                }
-            }
-        }
-    })
+    watch_external_with_config(source, WatchConfig::new(interval), tx)
 }

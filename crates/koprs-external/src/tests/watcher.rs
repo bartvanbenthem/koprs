@@ -3,9 +3,9 @@
 // Testing strategy
 // ----------------
 // ExternalSource is tested via a SequenceSource that yields a fixed list of
-// events on the first poll and nothing on subsequent ones. This lets us
-// verify that watch_external correctly forwards events and shuts down when
-// the receiver is dropped, without any real I/O.
+// events on the first poll and nothing on subsequent ones. FlakySource
+// simulates transient failures before eventually succeeding, exercising the
+// exponential backoff path. Both run fully in-process — no I/O required.
 
 #[cfg(test)]
 mod watcher_tests {
@@ -16,8 +16,9 @@ mod watcher_tests {
     use tokio::sync::mpsc;
     use tokio::time::timeout;
 
-    use crate::error::Result;
-    use crate::watcher::{ExternalEvent, ExternalSource, watch_external};
+    use crate::error::{ExternalError, Result};
+    use crate::watcher::{ExternalEvent, ExternalSource, WatchConfig, watch_external,
+        watch_external_with_config};
 
     // -----------------------------------------------------------------------
     // SequenceSource — yields a fixed set of events then goes quiet
@@ -54,6 +55,32 @@ mod watcher_tests {
     }
 
     // -----------------------------------------------------------------------
+    // FlakySource — fails N times then succeeds
+    // -----------------------------------------------------------------------
+
+    struct FlakySource {
+        failures_remaining: u32,
+    }
+
+    impl ExternalSource for FlakySource {
+        type Item = String;
+
+        fn poll(&mut self) -> BoxFuture<'_, Result<Vec<ExternalEvent<String>>>> {
+            let result = if self.failures_remaining > 0 {
+                self.failures_remaining -= 1;
+                Err(ExternalError::Internal("deliberate failure".to_string()))
+            } else {
+                Ok(vec![ExternalEvent::Added("recovered".to_string())])
+            };
+            Box::pin(async move { result })
+        }
+
+        fn name(&self) -> &str {
+            "flaky"
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // ExternalEvent — basic properties
     // -----------------------------------------------------------------------
 
@@ -80,6 +107,25 @@ mod watcher_tests {
         let e = ExternalEvent::Modified("hello".to_string());
         let e2 = e.clone();
         assert!(matches!(e2, ExternalEvent::Modified(ref s) if s == "hello"));
+    }
+
+    // -----------------------------------------------------------------------
+    // WatchConfig — construction and field values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn watch_config_default_max_backoff_is_32_times_interval() {
+        let interval = Duration::from_millis(100);
+        let config = WatchConfig::new(interval);
+        assert_eq!(config.interval, interval);
+        assert_eq!(config.max_backoff, interval * 32);
+    }
+
+    #[test]
+    fn watch_config_with_max_backoff_overrides_default() {
+        let config = WatchConfig::new(Duration::from_secs(30))
+            .with_max_backoff(Duration::from_secs(600));
+        assert_eq!(config.max_backoff, Duration::from_secs(600));
     }
 
     // -----------------------------------------------------------------------
@@ -155,5 +201,55 @@ mod watcher_tests {
             .await
             .expect("watcher task did not shut down after receiver was dropped")
             .expect("watcher task panicked");
+    }
+
+    // -----------------------------------------------------------------------
+    // watch_external — exponential backoff on errors
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn watch_external_recovers_after_consecutive_errors() {
+        // Fails 3 times then succeeds; all waits are 1–8 ms so recovery
+        // arrives well within the 2-second timeout.
+        let source = FlakySource { failures_remaining: 3 };
+        let (tx, mut rx) = mpsc::channel(16);
+        let _handle = watch_external(source, Duration::from_millis(1), tx);
+
+        let ev = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("watcher did not recover after 3 errors — timed out")
+            .expect("channel closed before recovery");
+
+        assert!(matches!(ev, ExternalEvent::Added(ref s) if s == "recovered"));
+    }
+
+    #[tokio::test]
+    async fn watch_external_does_not_stop_on_errors() {
+        let source = FlakySource { failures_remaining: 5 };
+        let (tx, mut rx) = mpsc::channel(16);
+        let _handle = watch_external(source, Duration::from_millis(1), tx);
+
+        let ev = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("watcher terminated after 5 errors instead of recovering")
+            .expect("channel closed");
+
+        assert!(matches!(ev, ExternalEvent::Added(_)));
+    }
+
+    #[tokio::test]
+    async fn watch_external_with_config_recovers_after_errors() {
+        let source = FlakySource { failures_remaining: 2 };
+        let config = WatchConfig::new(Duration::from_millis(1))
+            .with_max_backoff(Duration::from_millis(10));
+        let (tx, mut rx) = mpsc::channel(16);
+        let _handle = watch_external_with_config(source, config, tx);
+
+        let ev = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for recovery")
+            .expect("channel closed");
+
+        assert!(matches!(ev, ExternalEvent::Added(_)));
     }
 }
