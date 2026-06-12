@@ -1,6 +1,6 @@
 # Kubernetes Operators in Rust
 
-[`koprs`](./crates/koprs) is a high-level Kubernetes operator library for Rust. [`koprs-external`](./crates/koprs-external) is a companion crate that bridges HTTP endpoints and object stores (S3, GCS, Azure) into the same channel-based event model.
+[`koprs`](./crates/koprs) is a high-level Kubernetes operator library for Rust. [`koprs-external`](./crates/koprs-external) is a companion crate that bridges HTTP endpoints and object stores (S3) into the same channel-based event model.
 
 Operators simplify managing complex stateful applications on Kubernetes, but writing them remains difficult: low-level APIs, boilerplate, and poor modularity all add friction. Koprs is a Rust framework built on [`kube`](https://github.com/kube-rs/kube) and [`kube-runtime`](https://crates.io/crates/kube-runtime) that addresses this with high-level abstractions and extensions for common Operator use cases.
 
