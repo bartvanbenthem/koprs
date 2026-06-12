@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "koprs-external"
-version = "0.9.8"
+version = "0.9.1"
 dependencies = [
  "axum",
  "bytes",

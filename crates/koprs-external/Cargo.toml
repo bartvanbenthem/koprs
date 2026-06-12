@@ -1,6 +1,6 @@
 [package]
 name = "koprs-external"
-version = "0.9.8"
+version = "0.9.1"
 edition = "2024"
 description = "Generic polling watchers for external sources such as HTTP APIs and object stores, designed as a companion to koprs Kubernetes operators."
 license = "MIT"
