@@ -7,22 +7,8 @@
 //! The poller accepts any backend that implements the
 //! [`object_store::ObjectStore`] trait — S3, GCS, Azure Blob,
 //! local filesystem, HTTP, or the built-in in-memory store. Callers build
-//! their preferred backend and pass it as `Arc<dyn ObjectStore>`:
-//!
-//! ```ignore
-//! // Requires object_store = { version = "0.11", features = ["aws"] }
-//! use std::sync::Arc;
-//! use object_store::aws::AmazonS3Builder;
-//! use koprs_external::store::ObjectStorePoller;
-//!
-//! let store = Arc::new(
-//!     AmazonS3Builder::from_env()
-//!         .with_bucket_name("my-bucket")
-//!         .build()
-//!         .unwrap(),
-//! );
-//! let poller = ObjectStorePoller::new(store).with_prefix("configs/");
-//! ```
+//! their preferred backend and pass it as `Arc<dyn ObjectStore>`. See the
+//! [crate README](https://docs.rs/koprs-external) for backend-specific examples.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,44 +42,15 @@ pub struct StoredObject {
 // ObjectStorePoller
 // ---------------------------------------------------------------------------
 
-/// Polls any [`object_store::ObjectStore`]-compatible backend for
-/// object changes.
+/// Polls any [`object_store::ObjectStore`]-compatible backend for object changes.
 ///
 /// On each tick the poller lists all objects under the configured prefix,
 /// compares them to the previous listing by ETag, and emits the appropriate
 /// events. Objects without an ETag are treated as always-new and produce an
 /// [`ExternalEvent::Added`] on every poll until an ETag is available.
 ///
-/// # Examples
-///
-/// ```ignore
-/// // Requires object_store = { version = "0.11", features = ["aws"] }
-/// use std::sync::Arc;
-/// use std::time::Duration;
-/// use object_store::aws::AmazonS3Builder;
-/// use koprs_external::store::ObjectStorePoller;
-/// use koprs_external::watcher::{watch_external, ExternalEvent};
-/// use tokio::sync::mpsc;
-///
-/// let store = Arc::new(
-///     AmazonS3Builder::from_env()
-///         .with_bucket_name("my-bucket")
-///         .build()
-///         .unwrap(),
-/// );
-///
-/// let (tx, mut rx) = mpsc::channel(16);
-/// let poller = ObjectStorePoller::new(store).with_prefix("configs/");
-/// let _handle = watch_external(poller, Duration::from_secs(60), tx);
-///
-/// while let Some(event) = rx.recv().await {
-///     match event {
-///         ExternalEvent::Added(obj)    => println!("new:     {}", obj.path),
-///         ExternalEvent::Modified(obj) => println!("changed: {}", obj.path),
-///         ExternalEvent::Removed(obj)  => println!("deleted: {}", obj.path),
-///     }
-/// }
-/// ```
+/// Backend-specific setup (S3, GCS, Azure) is done by the caller — see the
+/// [crate README](https://docs.rs/koprs-external) for examples.
 pub struct ObjectStorePoller {
     store: Arc<dyn ObjectStore>,
     prefix: Option<Path>,
