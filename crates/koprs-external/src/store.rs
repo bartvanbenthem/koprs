@@ -5,13 +5,12 @@
 //! removed. Requires the `object-store` Cargo feature.
 //!
 //! The poller accepts any backend that implements the
-//! [`ObjectStore`][object_store::ObjectStore] trait — S3, GCS, Azure Blob,
+//! [`object_store::ObjectStore`] trait — S3, GCS, Azure Blob,
 //! local filesystem, HTTP, or the built-in in-memory store. Callers build
 //! their preferred backend and pass it as `Arc<dyn ObjectStore>`:
 //!
-//! ```no_run
-//! # #[cfg(feature = "object-store")]
-//! # async fn example() {
+//! ```ignore
+//! // Requires object_store = { version = "0.11", features = ["aws"] }
 //! use std::sync::Arc;
 //! use object_store::aws::AmazonS3Builder;
 //! use koprs_external::store::ObjectStorePoller;
@@ -23,7 +22,6 @@
 //!         .unwrap(),
 //! );
 //! let poller = ObjectStorePoller::new(store).with_prefix("configs/");
-//! # }
 //! ```
 
 use std::collections::HashMap;
@@ -58,7 +56,7 @@ pub struct StoredObject {
 // ObjectStorePoller
 // ---------------------------------------------------------------------------
 
-/// Polls any [`ObjectStore`][object_store::ObjectStore]-compatible backend for
+/// Polls any [`object_store::ObjectStore`]-compatible backend for
 /// object changes.
 ///
 /// On each tick the poller lists all objects under the configured prefix,
@@ -68,9 +66,8 @@ pub struct StoredObject {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// # #[cfg(feature = "object-store")]
-/// # async fn example() {
+/// ```ignore
+/// // Requires object_store = { version = "0.11", features = ["aws"] }
 /// use std::sync::Arc;
 /// use std::time::Duration;
 /// use object_store::aws::AmazonS3Builder;
@@ -96,7 +93,6 @@ pub struct StoredObject {
 ///         ExternalEvent::Removed(obj)  => println!("deleted: {}", obj.path),
 ///     }
 /// }
-/// # }
 /// ```
 pub struct ObjectStorePoller {
     store: Arc<dyn ObjectStore>,

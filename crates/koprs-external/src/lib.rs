@@ -1,7 +1,7 @@
 //! # koprs-external
 //!
 //! Generic polling watchers for external sources such as HTTP REST APIs and
-//! S3 buckets, designed as a companion to [`koprs`] Kubernetes operators.
+//! S3 buckets, designed as a companion to `koprs` Kubernetes operators.
 //!
 //! Kubernetes operators often need to reconcile cluster state with resources
 //! that live outside the cluster — a configuration endpoint, an object store,
@@ -10,16 +10,15 @@
 //!
 //! ## Core model
 //!
-//! The [`ExternalSource`][watcher::ExternalSource] trait represents any
-//! source that can be polled for changes. Implementations return
-//! [`ExternalEvent`][watcher::ExternalEvent] values that distinguish between
-//! items being added, modified, or removed. The source tracks its own state
-//! between polls so callers do not need to diff results themselves.
+//! The [`watcher::ExternalSource`] trait represents any source that can be
+//! polled for changes. Implementations return [`ExternalEvent`] values that
+//! distinguish
+//! between items being added, modified, or removed. The source tracks its own
+//! state between polls so callers do not need to diff results themselves.
 //!
-//! [`watch_external`][watcher::watch_external] spawns a background task that
-//! ticks on a configurable interval and forwards events to an
-//! [`mpsc`][tokio::sync::mpsc] channel, mirroring the pattern used by
-//! `koprs::watcher`.
+//! [`watch_external`] spawns a background task that ticks on a configurable
+//! interval and forwards events to an [`tokio::sync::mpsc`] channel, mirroring
+//! the pattern used by `koprs::watcher`.
 //!
 //! ## Quick start
 //!
