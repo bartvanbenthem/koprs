@@ -53,6 +53,10 @@ fn uid(name: &str) -> String {
 }
 
 async fn client() -> Client {
+    // Install ring as the default TLS provider. This is a no-op if one is already
+    // installed, but prevents a panic when the workspace build unifies both ring
+    // and aws-lc-rs rustls features (from koprs-admission's reqwest dev-dep).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     Client::try_default()
         .await
         .expect("Failed to build kube Client — is a cluster reachable?")

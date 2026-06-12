@@ -150,7 +150,9 @@ cargo test
 
 # integration tests
 kind create cluster --name koprs-test
+
 cargo test --features integration --test integration
+
 kind delete cluster --name koprs-test
 ```
 
