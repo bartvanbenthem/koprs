@@ -12,9 +12,9 @@
 //!
 //! ## Core model
 //!
-//! Implement [`Validator`][webhook::Validator] for your resource type —
+//! Implement [`Validator`] for your resource type —
 //! inspect the [`AdmissionRequest`] and return a [`ValidationResponse`].
-//! Pass the validator to [`WebhookBuilder`][webhook::WebhookBuilder] and call
+//! Pass the validator to [`WebhookBuilder`] and call
 //! `.run()`. The framework handles the rest.
 //!
 //! ## Quick start
