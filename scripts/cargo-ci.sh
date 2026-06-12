@@ -233,7 +233,7 @@ fi
 # ── 11. Unused dependencies ───────────────────────────────────────────────────
 if cargo +nightly udeps --version &>/dev/null 2>&1; then
   try_step "cargo udeps (nightly)" \
-    cargo +nightly udeps --all-targets
+    cargo +nightly udeps --all-targets --all-features
 else
   warn "cargo-udeps not installed (or nightly toolchain missing) — skipping."
   warn "Install: cargo install cargo-udeps  &&  rustup toolchain install nightly"
