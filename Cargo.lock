@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "koprs-admission"
-version = "0.1.0"
+version = "0.9.1"
 dependencies = [
  "axum",
  "bytes",
