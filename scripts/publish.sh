@@ -6,7 +6,6 @@
 #   ./scripts/publish.sh --dry-run    # stop before `cargo publish`
 #   ./scripts/publish.sh --skip-ci    # skip CI checks, publish only
 #   ./scripts/publish.sh --crate koprs          # publish a single crate only
-#   ./scripts/publish.sh --crate koprs-external # publish a single crate only
 
 set -euo pipefail
 
@@ -35,7 +34,7 @@ while [[ $# -gt 0 ]]; do
       echo ""
       echo "  --dry-run          run all checks but stop before cargo publish"
       echo "  --skip-ci          skip CI checks, go straight to packaging + publish"
-      echo "  --crate <name>     publish a single crate (koprs, koprs-external)"
+      echo "  --crate <name>     publish a single crate (koprs, koprs-external, koprs-admission)"
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
@@ -48,7 +47,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${ROOT_DIR}"
 
-ALL_CRATES=("koprs" "koprs-external")
+ALL_CRATES=("koprs" "koprs-external" "koprs-admission")
 
 if [[ -n "${SINGLE_CRATE}" ]]; then
   valid=false

@@ -49,11 +49,15 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use k8s_openapi::api::core::v1::ConfigMap;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use koprs_external::{
     ExternalEvent,
     http::HttpPoller,
     watcher::{ExternalSource, watch_external},
 };
+use kube::api::{DeleteParams, PostParams};
+use kube::{Api, Client};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -330,11 +334,6 @@ async fn watch_external_shuts_down_when_receiver_is_dropped() {
 #[tokio::test]
 #[ignore = "requires a running Kubernetes cluster; set KUBE_TOKEN and KUBE_API_URL, then run with -- --include-ignored"]
 async fn kubernetes_configmap_lifecycle_via_http_poller() {
-    use k8s_openapi::api::core::v1::ConfigMap;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use kube::api::{DeleteParams, PostParams};
-    use kube::{Api, Client};
-
     let token = std::env::var("KUBE_TOKEN").expect("KUBE_TOKEN must be set");
     let api_url =
         std::env::var("KUBE_API_URL").unwrap_or_else(|_| "https://127.0.0.1:6443".to_string());
