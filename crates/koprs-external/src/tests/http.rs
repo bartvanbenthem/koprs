@@ -49,12 +49,11 @@ mod http_tests {
         };
 
         // Conditional GET: return 304 if the client's If-None-Match matches
-        if let Some(ref etag) = etag_val {
-            if let Some(inm) = headers.get("if-none-match") {
-                if inm.to_str().unwrap_or("") == etag.as_str() {
-                    return StatusCode::NOT_MODIFIED.into_response();
-                }
-            }
+        if let Some(ref etag) = etag_val
+            && let Some(inm) = headers.get("if-none-match")
+            && inm.to_str().unwrap_or("") == etag.as_str()
+        {
+            return StatusCode::NOT_MODIFIED.into_response();
         }
 
         let mut resp_headers = HeaderMap::new();
@@ -334,5 +333,91 @@ mod http_tests {
         let events = poll_with_timeout(&mut poller).await;
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], ExternalEvent::Added(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeouts — a server that accepts but never answers
+    // -----------------------------------------------------------------------
+
+    /// Accept TCP connections and never write a response.
+    async fn start_black_hole() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        (format!("http://{addr}/hang"), handle)
+    }
+
+    #[tokio::test]
+    async fn poll_times_out_instead_of_hanging_when_server_never_answers() {
+        let (url, server) = start_black_hole().await;
+        let mut poller = HttpPoller::new(url).with_timeout(Duration::from_millis(200));
+        let result = timeout(Duration::from_secs(5), poller.poll())
+            .await
+            .expect("poll hung past its own timeout");
+        assert!(result.is_err(), "expected a timeout error");
+        server.abort();
+    }
+
+    #[test]
+    fn default_timeouts_are_bounded() {
+        assert_eq!(
+            crate::http::DEFAULT_REQUEST_TIMEOUT,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            crate::http::DEFAULT_CONNECT_TIMEOUT,
+            Duration::from_secs(10)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Body size limit
+    // -----------------------------------------------------------------------
+
+    async fn start_fixed_body_server(body: String) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/big",
+            get(move || {
+                let body = body.clone();
+                async move { body }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}/big"), handle)
+    }
+
+    #[tokio::test]
+    async fn body_over_max_size_is_rejected() {
+        let (url, server) = start_fixed_body_server("x".repeat(4096)).await;
+        let mut poller = HttpPoller::new(url).with_max_body_size(1024);
+        let result = timeout(Duration::from_secs(5), poller.poll())
+            .await
+            .unwrap();
+        assert!(result.is_err(), "oversized body must be rejected");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn body_within_max_size_is_returned() {
+        let (url, server) = start_fixed_body_server("x".repeat(512)).await;
+        let mut poller = HttpPoller::new(url).with_max_body_size(1024);
+        let events = timeout(Duration::from_secs(5), poller.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        match &events[0] {
+            ExternalEvent::Added(r) => assert_eq!(r.body.len(), 512),
+            other => panic!("unexpected {other:?}"),
+        }
+        server.abort();
     }
 }

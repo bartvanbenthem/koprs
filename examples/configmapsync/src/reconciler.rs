@@ -11,7 +11,7 @@ use tracing::{error, info};
 use koprs::controller::{Action, Context, Reconciler};
 use koprs::error::KubeGenericError;
 use koprs::events::{EventType, record_event};
-use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers};
+use koprs::finalizers::{add_finalizer_namespaced, remove_finalizer};
 use koprs::gc::gc_resources;
 use koprs::is_being_deleted;
 use koprs::meta::ObjectMetaBuilder;
@@ -54,7 +54,7 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
             info!(cr = %name, "deletion timestamp set — running cleanup");
 
             let target_ns = &cr.spec.target_namespace;
-            let cm_name = configmap_name(&name);
+            let cm_name = configmap_name(&namespace, &name);
 
             match delete_resource::<ConfigMap, _>(client.clone(), Namespaced(target_ns), &cm_name)
                 .await
@@ -63,12 +63,18 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
                 Ok(false) => info!(cm = %cm_name, "ConfigMap was already gone"),
                 Err(e) => {
                     error!(error = %e, "failed to delete ConfigMap during cleanup");
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
 
-            remove_finalizers::<ConfigMapSync, _>(client.clone(), Namespaced(&namespace), &name)
-                .await?;
+            // Remove only our finalizer; others (if any) stay in place.
+            remove_finalizer::<ConfigMapSync, _>(
+                client.clone(),
+                Namespaced(&namespace),
+                &*cr,
+                FINALIZER,
+            )
+            .await?;
             info!(cr = %name, "finalizer removed — deletion complete");
             return Ok(Action::await_change());
         }
@@ -82,8 +88,8 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
 
         // 2. Build and ensure the desired ConfigMap.
         let target_ns = &cr.spec.target_namespace;
-        let cm_name = configmap_name(&name);
-        let desired_cm = build_configmap(&cm_name, target_ns, &name, &cr.spec.data);
+        let cm_name = configmap_name(&namespace, &name);
+        let desired_cm = build_configmap(&cm_name, target_ns, &namespace, &name, &cr.spec.data);
 
         let outcome = ensure_resource::<ConfigMap, _>(
             client.clone(),
@@ -119,9 +125,12 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
         }
 
         // 3. Garbage-collect stale ConfigMaps previously owned by this CR.
-        gc_resources::<ConfigMap, _>(client.clone(), Namespaced(target_ns), MANAGED_LABEL, |cm| {
-            cm.name_any() == cm_name
-        })
+        gc_resources::<ConfigMap, _>(
+            client.clone(),
+            Namespaced(target_ns),
+            &owner_selector(&namespace, &name),
+            |cm| cm.name_any() == cm_name,
+        )
         .await?;
 
         // 4. Stamp the target namespace as a label on the CR.
@@ -170,6 +179,10 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
         Ok(Action::requeue(Duration::from_secs(300)))
     }
 
+    fn error_label(&self, err: &KubeGenericError) -> &'static str {
+        err.metric_label()
+    }
+
     fn error_policy(
         &self,
         cr: Arc<ConfigMapSync>,
@@ -185,13 +198,24 @@ impl Reconciler<ConfigMapSync> for ConfigMapSyncReconciler {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn configmap_name(cr_name: &str) -> String {
-    format!("cms-{cr_name}")
+/// Child name; includes the CR namespace so equally-named CRs in different
+/// namespaces never write the same object.
+fn configmap_name(cr_namespace: &str, cr_name: &str) -> String {
+    format!("cms-{cr_namespace}-{cr_name}")
+}
+
+/// Label selector matching only the children of one CR. GC with a selector
+/// shared by all CRs would make every CR delete the others' children.
+fn owner_selector(cr_namespace: &str, cr_name: &str) -> String {
+    format!(
+        "{MANAGED_LABEL},configmapsync.example.io/owner={cr_name},configmapsync.example.io/owner-namespace={cr_namespace}"
+    )
 }
 
 fn build_configmap(
     name: &str,
     namespace: &str,
+    owner_ns: &str,
     owner_cr: &str,
     data: &BTreeMap<String, String>,
 ) -> ConfigMap {
@@ -201,6 +225,7 @@ fn build_configmap(
             .namespace(namespace)
             .label("app.kubernetes.io/managed-by", "configmapsync-operator")
             .label("configmapsync.example.io/owner", owner_cr)
+            .label("configmapsync.example.io/owner-namespace", owner_ns)
             .build(),
         data: Some(data.clone()),
         ..Default::default()

@@ -354,7 +354,7 @@ mod owners_tests {
     }
 
     use crate::owners::{make_object_ref_mapper, make_object_refs, owner_label_mapper};
-    use crate::scope::{Cluster, Namespaced};
+    use crate::scope::{AllNamespaces, Cluster, Namespaced};
 
     #[tokio::test]
     async fn make_object_refs_namespaced_returns_one_ref_per_resource() {
@@ -425,7 +425,7 @@ mod owners_tests {
             send.send_response(json_response(configmap_list(&[], "ns")));
         });
 
-        let refs = make_object_refs::<ConfigMap, _>(client, Cluster)
+        let refs = make_object_refs::<ConfigMap, _>(client, AllNamespaces)
             .await
             .unwrap();
         assert!(refs.is_empty());
@@ -483,5 +483,44 @@ mod owners_tests {
         let r2 = mapper(node2);
         assert_eq!(r1.len(), 1);
         assert_eq!(r2.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // owner_labels_mapper — owner may live in another namespace
+    // -----------------------------------------------------------------------
+
+    fn labelled_cm(ns: &str, labels: &[(&str, &str)]) -> ConfigMap {
+        let mut cm = ConfigMap::default();
+        cm.metadata.name = Some("child".into());
+        cm.metadata.namespace = Some(ns.into());
+        cm.metadata.labels = Some(
+            labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        cm
+    }
+
+    #[test]
+    fn owner_labels_mapper_uses_the_owner_namespace_label() {
+        let mapper = crate::owners::owner_labels_mapper::<ConfigMap, ConfigMap>("o/name", "o/ns");
+        let r = mapper(labelled_cm("target", &[("o/name", "cr"), ("o/ns", "home")])).unwrap();
+        assert_eq!(r.name, "cr");
+        assert_eq!(r.namespace.as_deref(), Some("home"));
+    }
+
+    #[test]
+    fn owner_labels_mapper_falls_back_to_trigger_namespace() {
+        let mapper = crate::owners::owner_labels_mapper::<ConfigMap, ConfigMap>("o/name", "o/ns");
+        let r = mapper(labelled_cm("target", &[("o/name", "cr")])).unwrap();
+        assert_eq!(r.namespace.as_deref(), Some("target"));
+    }
+
+    #[test]
+    fn owner_labels_mapper_drops_events_without_owner_name() {
+        let mapper = crate::owners::owner_labels_mapper::<ConfigMap, ConfigMap>("o/name", "o/ns");
+        assert!(mapper(labelled_cm("target", &[("o/ns", "home")])).is_none());
+        assert!(mapper(labelled_cm("target", &[("o/name", "")])).is_none());
     }
 }

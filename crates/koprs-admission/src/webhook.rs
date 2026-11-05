@@ -4,7 +4,8 @@
 //! needed to run a Kubernetes validating admission webhook server.
 //!
 //! [`WebhookBuilder`] handles the operational skeleton every production
-//! webhook needs: TLS, graceful shutdown, `/healthz`/`/readyz` HTTP probes,
+//! webhook needs: TLS with certificate hot-reload, connection and request
+//! timeouts, graceful connection draining, `/healthz`/`/readyz` HTTP probes,
 //! and routing `POST` requests to typed validator implementations.
 //! Implement [`Validator`] for your resource type and call
 //! [`WebhookBuilder::run`] — everything else is automatic.
@@ -12,7 +13,6 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use std::fs;
 //! use koprs_admission::{AdmissionRequest, ValidationResponse};
 //! use koprs_admission::webhook::{Validator, WebhookBuilder};
 //! use serde::Deserialize;
@@ -45,12 +45,9 @@
 //! }
 //!
 //! # async fn example() -> Result<(), koprs_admission::AdmissionError> {
-//! let cert_pem = fs::read("/tls/tls.crt")?;
-//! let key_pem  = fs::read("/tls/tls.key")?;
-//!
 //! WebhookBuilder::new()
 //!     .port(8443)
-//!     .tls_from_pem(&cert_pem, &key_pem)?
+//!     .tls_from_files("/tls/tls.crt", "/tls/tls.key")?
 //!     .health_port(8080)
 //!     .graceful_shutdown()
 //!     .validate("/validate/myresource", ReplicaLimit)
@@ -61,10 +58,13 @@
 //! ```
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use axum::body::Body;
+use axum::extract::DefaultBodyLimit;
 use axum::{Json, Router, routing};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -73,7 +73,8 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::server::graceful::{GracefulShutdown, Watcher};
 use rustls::ServerConfig;
 use serde::de::DeserializeOwned;
 use tokio::net::TcpListener;
@@ -81,11 +82,12 @@ use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 use tracing::{debug, info, warn};
 
-use crate::error::{AdmissionError, Result};
+use crate::error::Result;
 use crate::review::{
     AdmissionRequest, ValidationResponse, build_deny_response, build_response, parse_request,
     parse_uid,
 };
+use crate::tls;
 
 // ---------------------------------------------------------------------------
 // Validator trait
@@ -299,36 +301,53 @@ async fn shutdown_signal() {
 // WebhookBuilder
 // ---------------------------------------------------------------------------
 
-/// Builder for a validating admission webhook server.
+/// Default limit on how long a single admission request may take.
 ///
-/// Wraps an `axum` router and adds:
+/// The API server's own webhook timeout defaults to 10 s, so there is no point
+/// in letting a validator run longer.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time a client may take to complete the TLS handshake.
+pub(crate) const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time a client may take to send the request headers.
+pub(crate) const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum time to wait for in-flight requests to finish on shutdown.
+pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum accepted `AdmissionReview` body size. Objects may be up to ~1.5 MiB
+/// and UPDATE reviews carry both `object` and `oldObject`.
+pub(crate) const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Builder for a validating admission webhook server.
 ///
 /// | Method | What it provides |
 /// |--------|-----------------|
 /// | `.port(port)` | Bind port for the webhook HTTPS/HTTP server |
+/// | `.tls_from_files(cert, key)` | TLS from files, **reloaded automatically** on rotation |
+/// | `.tls_from_pem(cert, key)` | TLS from in-memory PEM bytes (static) |
 /// | `.tls(config)` | TLS using a pre-built `rustls::ServerConfig` |
-/// | `.tls_from_pem(cert, key)` | TLS from in-memory PEM bytes |
 /// | `.health_port(port)` | `GET /healthz` + `GET /readyz` server |
-/// | `.graceful_shutdown()` | Clean stop on SIGTERM or Ctrl+C |
+/// | `.graceful_shutdown()` | Drain in-flight requests on SIGTERM or Ctrl+C |
+/// | `.request_timeout(dur)` | Upper bound on a single admission request (default 10 s) |
 /// | `.validate(path, validator)` | Register a typed validator at `path` |
 ///
 /// # TLS
 ///
-/// Kubernetes requires admission webhooks to be served over HTTPS. Configure
-/// TLS by either:
+/// Kubernetes requires admission webhooks to be served over HTTPS. Prefer
+/// [`tls_from_files`](Self::tls_from_files) with the paths of a mounted
+/// cert-manager `Secret`: the certificate is re-read when the files change,
+/// so rotations need no pod restart. When no TLS is configured the server
+/// listens on plain HTTP, which is useful when TLS is terminated by a sidecar
+/// or service mesh.
 ///
-/// - Calling `.tls(Arc::new(server_config))` with a pre-built
-///   [`rustls::ServerConfig`].
-/// - Calling `.tls_from_pem(&cert_pem, &key_pem)` with PEM-encoded
-///   certificate and private key bytes (e.g. from a cert-manager `Secret`).
+/// # Hardening
 ///
-/// When no TLS is configured the server listens on plain HTTP, which is
-/// useful when TLS is terminated by a sidecar or service mesh.
+/// Every connection gets a TLS handshake timeout and a header read timeout,
+/// every request a [`request_timeout`](Self::request_timeout), and request
+/// bodies are limited to 8 MiB, so slow or misbehaving clients cannot tie up
+/// the server.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use std::fs;
 /// use koprs_admission::{AdmissionRequest, ValidationResponse};
 /// use koprs_admission::webhook::{Validator, WebhookBuilder};
 /// use serde::Deserialize;
@@ -354,12 +373,9 @@ async fn shutdown_signal() {
 /// }
 ///
 /// # async fn example() -> Result<(), koprs_admission::AdmissionError> {
-/// let cert_pem = fs::read("/tls/tls.crt")?;
-/// let key_pem  = fs::read("/tls/tls.key")?;
-///
 /// WebhookBuilder::new()
 ///     .port(8443)
-///     .tls_from_pem(&cert_pem, &key_pem)?
+///     .tls_from_files("/tls/tls.crt", "/tls/tls.key")?
 ///     .health_port(8080)
 ///     .graceful_shutdown()
 ///     .validate("/validate/myresource", ReplicaLimit)
@@ -373,6 +389,7 @@ pub struct WebhookBuilder {
     pub(crate) tls: Option<Arc<ServerConfig>>,
     pub(crate) health_port: Option<u16>,
     pub(crate) graceful_shutdown: bool,
+    pub(crate) request_timeout: Duration,
     pub(crate) routes: Vec<(String, BoxedHandler)>,
 }
 
@@ -385,13 +402,15 @@ impl Default for WebhookBuilder {
 impl WebhookBuilder {
     /// Create a new builder with default settings.
     ///
-    /// Defaults: port `8443`, no TLS, no health server, no graceful shutdown.
+    /// Defaults: port `8443`, no TLS, no health server, no graceful shutdown,
+    /// 10 s request timeout.
     pub fn new() -> Self {
         Self {
             port: 8443,
             tls: None,
             health_port: None,
             graceful_shutdown: false,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             routes: vec![],
         }
     }
@@ -405,9 +424,9 @@ impl WebhookBuilder {
     /// Configure TLS using a pre-built [`rustls::ServerConfig`].
     ///
     /// Use this when you need full control over the TLS configuration
-    /// (client auth, custom cipher suites, ALPN). For the common
-    /// cert-manager-issued certificate case, [`tls_from_pem`][Self::tls_from_pem]
-    /// is simpler.
+    /// (client auth, custom cipher suites, ALPN). For a mounted cert-manager
+    /// certificate, [`tls_from_files`][Self::tls_from_files] is simpler and
+    /// handles rotation.
     pub fn tls(mut self, config: Arc<ServerConfig>) -> Self {
         self.tls = Some(config);
         self
@@ -415,12 +434,11 @@ impl WebhookBuilder {
 
     /// Configure TLS from PEM-encoded certificate and private key bytes.
     ///
-    /// Accepts the raw bytes of a PEM file, as you would read from a
-    /// cert-manager `Secret` volume mount (e.g. `/tls/tls.crt` and
-    /// `/tls/tls.key`). Supports RSA and ECDSA private keys.
-    ///
-    /// Returns an error if the PEM data is malformed or contains no usable
-    /// certificate/key pair.
+    /// The certificate is fixed for the lifetime of the server; use
+    /// [`tls_from_files`][Self::tls_from_files] if it can be rotated.
+    /// Supports RSA, ECDSA and Ed25519 keys. Returns an error if the PEM data
+    /// is malformed, contains no usable certificate/key pair, or the key does
+    /// not match the certificate.
     ///
     /// # Examples
     ///
@@ -435,37 +453,50 @@ impl WebhookBuilder {
     /// # }
     /// ```
     pub fn tls_from_pem(mut self, cert_pem: &[u8], key_pem: &[u8]) -> Result<Self> {
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-        use rustls_pemfile::{certs, private_key};
-
-        let certs: Vec<CertificateDer<'static>> = certs(&mut &cert_pem[..])
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| AdmissionError::Tls(e.to_string()))?;
-
-        if certs.is_empty() {
-            return Err(AdmissionError::Tls(
-                "no certificates found in PEM data".into(),
-            ));
-        }
-
-        let key: PrivateKeyDer<'static> = private_key(&mut &key_pem[..])
-            .map_err(|e| AdmissionError::Tls(e.to_string()))?
-            .ok_or_else(|| AdmissionError::Tls("no private key found in PEM data".into()))?;
-
-        let config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| AdmissionError::Tls(e.to_string()))?;
-
+        let key = tls::certified_key_from_pem(cert_pem, key_pem, &tls::provider())?;
+        let config = tls::server_config(Arc::new(tls::StaticCertResolver(Arc::new(key))))?;
         self.tls = Some(Arc::new(config));
+        Ok(self)
+    }
+
+    /// Configure TLS from certificate and key files, reloading them when they
+    /// change on disk.
+    ///
+    /// Point this at a mounted cert-manager `Secret` (e.g. `/tls/tls.crt` and
+    /// `/tls/tls.key`). The files are checked for changes at most every 10 s;
+    /// a rotated certificate is picked up on the next TLS handshake without
+    /// restarting the pod. If a reload fails, the previous certificate keeps
+    /// being served.
+    ///
+    /// Returns an error if the files cannot be read or do not contain a
+    /// matching certificate/key pair at startup.
+    pub fn tls_from_files(
+        self,
+        cert_path: impl Into<PathBuf>,
+        key_path: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        self.tls_from_files_with_interval(cert_path, key_path, tls::DEFAULT_RELOAD_INTERVAL)
+    }
+
+    /// Like [`tls_from_files`](Self::tls_from_files) with a custom reload
+    /// check interval.
+    pub fn tls_from_files_with_interval(
+        mut self,
+        cert_path: impl Into<PathBuf>,
+        key_path: impl Into<PathBuf>,
+        reload_interval: Duration,
+    ) -> Result<Self> {
+        let resolver = tls::ReloadingCertResolver::new(cert_path, key_path, reload_interval)?;
+        self.tls = Some(Arc::new(tls::server_config(Arc::new(resolver))?));
         Ok(self)
     }
 
     /// Start a health probe HTTP server on `0.0.0.0:<port>`.
     ///
     /// `GET /healthz` always returns `200 OK`.
-    /// `GET /readyz` returns `503` until the webhook server is bound and
-    /// ready to serve requests, then `200 OK`.
+    /// `GET /readyz` returns `200 OK` while the webhook listener is bound and
+    /// serving, and `503` before that and after a shutdown signal (so the pod
+    /// is removed from the Service endpoints while it drains).
     pub fn health_port(mut self, port: u16) -> Self {
         self.health_port = Some(port);
         self
@@ -473,16 +504,26 @@ impl WebhookBuilder {
 
     /// Stop the server cleanly on SIGTERM or Ctrl+C.
     ///
-    /// In-flight requests are allowed to complete. New connections are no
-    /// longer accepted once the signal is received.
+    /// On the signal, `/readyz` switches to `503`, new connections are no
+    /// longer accepted, and in-flight requests are given up to 15 s to finish
+    /// before [`run`](Self::run) returns.
     pub fn graceful_shutdown(mut self) -> Self {
         self.graceful_shutdown = true;
         self
     }
 
+    /// Upper bound on how long one admission request may take (default 10 s).
+    ///
+    /// A validator that exceeds it gets an HTTP 500 response, so the
+    /// webhook's `failurePolicy` applies.
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
     /// Register a typed [`Validator`] to handle `POST` requests at `path`.
     ///
-    /// The path must match the `rules[].operations` path configured on the
+    /// The path must match the `clientConfig.service.path` configured on the
     /// `ValidatingWebhookConfiguration` (e.g. `/validate/myresource`).
     ///
     /// Multiple validators can be registered at different paths by chaining
@@ -528,6 +569,31 @@ impl WebhookBuilder {
         self
     }
 
+    /// Build the axum router for the registered validators.
+    pub(crate) fn router(routes: Vec<(String, BoxedHandler)>, request_timeout: Duration) -> Router {
+        use axum::response::IntoResponse;
+
+        let mut router = Router::new();
+        for (path, handler) in routes {
+            router = router.route(
+                &path,
+                routing::post(move |Json(body): Json<serde_json::Value>| {
+                    let handler = handler.clone();
+                    async move {
+                        match tokio::time::timeout(request_timeout, handler(body)).await {
+                            Ok(response) => response,
+                            Err(_) => {
+                                warn!(timeout = ?request_timeout, "Admission request timed out");
+                                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                            }
+                        }
+                    }
+                }),
+            );
+        }
+        router.layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+    }
+
     /// Start the webhook server.
     ///
     /// In order:
@@ -535,28 +601,19 @@ impl WebhookBuilder {
     /// 2. Binds the webhook listener on the configured port.
     /// 3. Marks `/readyz` healthy.
     /// 4. Serves requests — with TLS if configured, plain HTTP otherwise.
-    /// 5. Stops cleanly on shutdown signal if `.graceful_shutdown()` was set.
+    /// 5. On a shutdown signal (if `.graceful_shutdown()` was set), stops
+    ///    accepting connections and drains in-flight requests.
     pub async fn run(self) -> Result<()> {
         let WebhookBuilder {
             port,
             tls,
             health_port,
             graceful_shutdown,
+            request_timeout,
             routes,
         } = self;
 
-        // --- Build axum router ---
-        let mut router = Router::new();
-        for (path, handler) in routes {
-            let h = handler.clone();
-            router = router.route(
-                &path,
-                routing::post(move |Json(body): Json<serde_json::Value>| {
-                    let handler = h.clone();
-                    async move { handler(body).await }
-                }),
-            );
-        }
+        let router = Self::router(routes, request_timeout);
 
         // --- Health server ---
         let ready = Arc::new(AtomicBool::new(false));
@@ -567,74 +624,102 @@ impl WebhookBuilder {
         }
 
         // --- Shutdown signal ---
-        let shutdown_rx = if graceful_shutdown {
-            let (tx, rx) = tokio::sync::watch::channel(false);
+        // `_shutdown_tx` lives until `run` returns, so the receiver never
+        // observes a closed channel when graceful shutdown is disabled.
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        if graceful_shutdown {
+            let tx = _shutdown_tx.clone();
+            let ready = ready.clone();
             tokio::spawn(async move {
                 shutdown_signal().await;
                 info!("Shutdown signal received");
+                ready.store(false, Ordering::Release);
                 tx.send(true).ok();
             });
-            Some(rx)
-        } else {
-            None
-        };
+        }
 
         // --- Bind webhook port ---
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;
-        info!(port, "Webhook server listening");
+        info!(port, tls = tls.is_some(), "Webhook server listening");
         ready.store(true, Ordering::Release);
 
-        // --- Serve ---
-        match tls {
-            Some(tls_config) => {
-                let acceptor = TlsAcceptor::from(tls_config);
-                let serve = async {
-                    loop {
-                        let Ok((stream, _)) = listener.accept().await else {
-                            break;
-                        };
-                        let acc = acceptor.clone();
-                        let svc = router.clone();
-                        tokio::spawn(async move {
-                            let Ok(tls_stream) = acc.accept(stream).await else {
-                                warn!("TLS handshake failed");
-                                return;
-                            };
-                            let io = TokioIo::new(tls_stream);
-                            let hyper_svc = service_fn(move |req: Request<Incoming>| {
-                                let s = svc.clone();
-                                async move { s.oneshot(req.map(Body::new)).await }
-                            });
-                            if let Err(e) =
-                                http1::Builder::new().serve_connection(io, hyper_svc).await
-                            {
-                                debug!(error = %e, "Connection closed");
-                            }
-                        });
+        serve(listener, tls.map(TlsAcceptor::from), router, shutdown_rx).await;
+        Ok(())
+    }
+}
+
+/// Accept connections until `shutdown` flips to `true`, then drain.
+pub(crate) async fn serve(
+    listener: TcpListener,
+    acceptor: Option<TlsAcceptor>,
+    router: Router,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let graceful = GracefulShutdown::new();
+
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, peer) = match accepted {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        // Typically EMFILE / ECONNABORTED: transient, keep serving.
+                        warn!(error = %e, "Failed to accept connection");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
                     }
-                    Ok::<(), AdmissionError>(())
                 };
-                match shutdown_rx {
-                    Some(mut rx) => {
-                        tokio::select! {
-                            r = serve => r,
-                            _ = async move { rx.changed().await.ok(); } => Ok(()),
+                let router = router.clone();
+                let acceptor = acceptor.clone();
+                let watcher = graceful.watcher();
+                tokio::spawn(async move {
+                    match acceptor {
+                        Some(acc) => {
+                            match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acc.accept(stream)).await {
+                                Ok(Ok(tls_stream)) => {
+                                    serve_connection(TokioIo::new(tls_stream), router, watcher).await;
+                                }
+                                Ok(Err(e)) => debug!(%peer, error = %e, "TLS handshake failed"),
+                                Err(_) => debug!(%peer, "TLS handshake timed out"),
+                            }
                         }
+                        None => serve_connection(TokioIo::new(stream), router, watcher).await,
                     }
-                    None => serve.await,
+                });
+            }
+            // Map to `bool` so the watch read guard is not held across awaits
+            // (it is `!Send`).
+            stop = async { shutdown.wait_for(|stop| *stop).await.is_ok() } => {
+                if stop {
+                    break;
                 }
             }
-            None => match shutdown_rx {
-                Some(mut rx) => axum::serve(listener, router)
-                    .with_graceful_shutdown(async move {
-                        rx.changed().await.ok();
-                    })
-                    .await
-                    .map_err(AdmissionError::Io),
-                None => axum::serve(listener, router)
-                    .await
-                    .map_err(AdmissionError::Io),
-            },
         }
+    }
+
+    drop(listener);
+    info!("Webhook server draining in-flight requests");
+    if tokio::time::timeout(DRAIN_TIMEOUT, graceful.shutdown())
+        .await
+        .is_err()
+    {
+        warn!(timeout = ?DRAIN_TIMEOUT, "Drain timed out; closing remaining connections");
+    }
+}
+
+async fn serve_connection<I>(io: I, router: Router, watcher: Watcher)
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let svc = service_fn(move |req: Request<Incoming>| {
+        let router = router.clone();
+        async move { router.oneshot(req.map(Body::new)).await }
+    });
+    let conn = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT)
+        .serve_connection(io, svc);
+    if let Err(e) = watcher.watch(conn).await {
+        debug!(error = %e, "Connection closed");
     }
 }

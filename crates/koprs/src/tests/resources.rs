@@ -36,7 +36,7 @@ mod resources_tests {
         get_resource, list_resource_names, list_resources_scoped, patch_annotations, patch_labels,
         remove_annotations, remove_labels, wait_for_condition, wait_for_resources,
     };
-    use crate::scope::{Cluster, Namespaced};
+    use crate::scope::{AllNamespaces, Cluster, Namespaced};
     use kube::api::ListParams;
 
     // -----------------------------------------------------------------------
@@ -527,7 +527,7 @@ mod resources_tests {
             send.send_response(json_response(single_configmap_list("cm1", "default")));
         });
 
-        let list = list_resources_scoped::<ConfigMap, _>(client, Cluster, Default::default())
+        let list = list_resources_scoped::<ConfigMap, _>(client, AllNamespaces, Default::default())
             .await
             .unwrap();
         assert_eq!(list.items.len(), 1);
@@ -544,7 +544,7 @@ mod resources_tests {
             send.send_response(json_response(empty_configmap_list()));
         });
 
-        let list = list_resources_scoped::<ConfigMap, _>(client, Cluster, Default::default())
+        let list = list_resources_scoped::<ConfigMap, _>(client, AllNamespaces, Default::default())
             .await
             .unwrap();
         assert!(list.items.is_empty());
@@ -576,7 +576,7 @@ mod resources_tests {
 
         let list = list_resources_scoped::<ConfigMap, _>(
             client,
-            Cluster,
+            AllNamespaces,
             ListParams::default().labels("app=my-op"),
         )
         .await
@@ -829,7 +829,7 @@ mod resources_tests {
         });
 
         let result =
-            list_resources_scoped::<ConfigMap, _>(client, Cluster, Default::default()).await;
+            list_resources_scoped::<ConfigMap, _>(client, AllNamespaces, Default::default()).await;
         assert!(result.is_err(), "expected Err, got Ok");
         server.await.unwrap();
     }
@@ -1447,7 +1447,7 @@ mod resources_tests {
                     cm.metadata
                         .labels
                         .as_ref()
-                        .map_or(false, |l| l.contains_key("ready"))
+                        .is_some_and(|l| l.contains_key("ready"))
                 },
             ),
         )

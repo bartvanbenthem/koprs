@@ -106,7 +106,7 @@ mod error_tests {
     #[test]
     fn result_ok_variant_works() {
         let r: Result<i32> = Ok(42);
-        assert_eq!(r.unwrap(), 42);
+        assert!(matches!(r, Ok(42)));
     }
 
     #[test]
@@ -123,13 +123,42 @@ mod error_tests {
     fn all_variants_implement_debug_without_panicking() {
         let variants: &[KubeGenericError] = &[
             KubeGenericError::MissingMetadata("x".to_string()),
-            KubeGenericError::Io(io::Error::new(io::ErrorKind::Other, "x")),
+            KubeGenericError::Io(io::Error::other("x")),
             KubeGenericError::Serialization(
                 serde_json::from_str::<serde_json::Value>("!").unwrap_err(),
             ),
+            KubeGenericError::Config("x".to_string()),
+            KubeGenericError::LeaderElectionLost("x".to_string()),
         ];
         for v in variants {
             let _ = format!("{v:?}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // metric_label — bounded, data-free labels
+    // -----------------------------------------------------------------------
+
+    fn api_error(code: u16) -> KubeGenericError {
+        KubeGenericError::Kube(kube::Error::Api(
+            kube::core::Status::failure(&format!("object my-cr-{code} failed"), "Reason")
+                .with_code(code)
+                .boxed(),
+        ))
+    }
+
+    #[test]
+    fn metric_label_classifies_api_errors_by_status_code() {
+        assert_eq!(api_error(404).metric_label(), "kube_not_found");
+        assert_eq!(api_error(409).metric_label(), "kube_conflict");
+        assert_eq!(api_error(503).metric_label(), "kube_server_error");
+        assert_eq!(api_error(418).metric_label(), "kube_api_error");
+    }
+
+    #[test]
+    fn metric_label_never_contains_error_message_data() {
+        let err = KubeGenericError::MissingMetadata("very-specific-field".to_string());
+        assert_eq!(err.metric_label(), "missing_metadata");
+        assert!(!api_error(409).metric_label().contains("my-cr"));
     }
 }

@@ -5,10 +5,11 @@ use k8s_openapi::api::core::v1::Namespace;
 use kube::api::{DeleteParams, ListParams, ObjectList, Patch, PatchParams};
 use kube::core::ObjectMeta;
 use kube::{Api, Client, ResourceExt};
-use tracing::{error, info};
+use tracing::{debug, info, warn};
 
+use crate::error::KubeGenericError;
 use crate::error::Result;
-use crate::scope::ApiScope;
+use crate::scope::{ApiScope, ListScope};
 use crate::traits::KubeResource;
 
 // ---------------------------------------------------------------------------
@@ -74,7 +75,7 @@ pub async fn ensure_namespace(
         },
         ..Default::default()
     };
-    info!(%name, "Ensuring namespace exists");
+    debug!(%name, "Ensuring namespace exists");
     let params = PatchParams::apply(field_manager).force();
     Ok(api.patch(name, &params, &Patch::Apply(&ns)).await?)
 }
@@ -83,11 +84,20 @@ pub async fn ensure_namespace(
 // Private core helpers
 // ---------------------------------------------------------------------------
 
+/// The object's `metadata.name`, or [`KubeGenericError::MissingMetadata`].
+fn required_name<T: KubeResource>(resource: &T) -> Result<&str> {
+    resource
+        .meta()
+        .name
+        .as_deref()
+        .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))
+}
+
 async fn apply_resource_inner<T>(api: Api<T>, resource: &T, field_manager: &str) -> Result<T>
 where
     T: KubeResource,
 {
-    let name = resource.meta().name.as_deref().unwrap_or("[unnamed]");
+    let name = required_name(resource)?;
     let params = PatchParams::apply(field_manager).force();
     Ok(api.patch(name, &params, &Patch::Apply(resource)).await?)
 }
@@ -163,12 +173,12 @@ where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
-    let name = resource.meta().name.as_deref().unwrap_or("[unnamed]");
+    let name = required_name(resource)?;
     let kind = T::kind(&());
 
     match scope.namespace() {
-        Some(namespace) => info!(%namespace, %kind, %name, "Applying resource"),
-        None => info!(%kind, %name, "Applying resource"),
+        Some(namespace) => debug!(%namespace, %kind, %name, "Applying resource"),
+        None => debug!(%kind, %name, "Applying resource"),
     }
 
     apply_resource_inner(scope.into_api(client), resource, field_manager).await
@@ -209,8 +219,8 @@ where
     let kind = T::kind(&());
 
     match scope.namespace() {
-        Some(namespace) => info!(%namespace, %kind, %name, "Deleting resource"),
-        None => info!(%kind, %name, "Deleting resource"),
+        Some(namespace) => debug!(%namespace, %kind, %name, "Deleting resource"),
+        None => debug!(%kind, %name, "Deleting resource"),
     }
 
     delete_resource_inner(scope.into_api(client), name).await
@@ -251,8 +261,8 @@ where
 {
     let kind = T::kind(&());
     match scope.namespace() {
-        Some(namespace) => info!(%namespace, %kind, %name, "Getting resource"),
-        None => info!(%kind, %name, "Getting resource"),
+        Some(namespace) => debug!(%namespace, %kind, %name, "Getting resource"),
+        None => debug!(%kind, %name, "Getting resource"),
     }
     get_resource_inner(scope.into_api(client), name).await
 }
@@ -339,12 +349,12 @@ where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
-    let name = resource.meta().name.as_deref().unwrap_or("[unnamed]");
+    let name = required_name(resource)?;
     let kind = T::kind(&());
 
     match scope.namespace() {
-        Some(ns) => info!(%ns, %kind, %name, "Ensuring resource"),
-        None => info!(%kind, %name, "Ensuring resource"),
+        Some(ns) => debug!(%ns, %kind, %name, "Ensuring resource"),
+        None => debug!(%kind, %name, "Ensuring resource"),
     }
 
     let api = scope.into_api(client);
@@ -366,7 +376,7 @@ where
             EnsureOutcome::Updated(applied)
         }
         _ => {
-            info!(%kind, %name, "Resource unchanged");
+            debug!(%kind, %name, "Resource unchanged");
             EnsureOutcome::Unchanged(applied)
         }
     };
@@ -406,7 +416,7 @@ pub async fn list_resources_scoped<T, Scope>(
 ) -> Result<ObjectList<T>>
 where
     T: KubeResource,
-    Scope: ApiScope<T>,
+    Scope: ListScope<T>,
 {
     list_inner(scope.into_api(client), params).await
 }
@@ -477,35 +487,35 @@ pub async fn wait_for_resources<T, Scope>(
 ) -> Result<Vec<T>>
 where
     T: KubeResource,
-    Scope: ApiScope<T> + Clone,
+    Scope: ListScope<T>,
 {
     let kind = T::kind(&());
     let namespace = scope.namespace();
 
     match namespace {
-        Some(ns) => info!(namespace = %ns, %kind, "Waiting for at least one resource"),
-        None => info!(%kind, "Waiting for at least one resource"),
+        Some(ns) => debug!(namespace = %ns, %kind, "Waiting for at least one resource"),
+        None => debug!(%kind, "Waiting for at least one resource"),
     }
 
     loop {
-        let api: Api<T> = scope.clone().into_api(client.clone());
+        let api: Api<T> = scope.into_api(client.clone());
         match api.list(&Default::default()).await {
             Ok(list) if !list.items.is_empty() => {
-                info!(%kind, count = list.items.len(), "Resources found");
+                debug!(%kind, count = list.items.len(), "Resources found");
                 return Ok(list.items);
             }
             Ok(_) => {
-                info!(%kind, ?interval, "No resources found, retrying");
+                debug!(%kind, ?interval, "No resources found, retrying");
                 tokio::time::sleep(interval).await;
             }
             Err(kube::Error::Api(e)) if e.code == 404 => {
                 let backoff = interval.min(Duration::from_secs(60));
-                error!(%kind, code = 404, ?backoff, "CRD not found, retrying");
+                warn!(%kind, code = 404, ?backoff, "CRD not found, retrying");
                 tokio::time::sleep(backoff).await;
             }
             Err(e) => {
                 let backoff = (interval * 2).min(Duration::from_secs(60));
-                error!(%kind, error = %e, ?backoff, "API error, retrying");
+                warn!(%kind, error = %e, ?backoff, "API error, retrying");
                 tokio::time::sleep(backoff).await;
             }
         }
@@ -555,29 +565,29 @@ pub async fn wait_for_condition<T, Scope, F>(
 ) -> Result<T>
 where
     T: KubeResource,
-    Scope: ApiScope<T> + Clone,
+    Scope: ApiScope<T>,
     F: Fn(&T) -> bool,
 {
     let kind = T::kind(&());
     match scope.namespace() {
-        Some(ns) => info!(namespace = %ns, %kind, %name, "Waiting for condition"),
-        None => info!(%kind, %name, "Waiting for condition"),
+        Some(ns) => debug!(namespace = %ns, %kind, %name, "Waiting for condition"),
+        None => debug!(%kind, %name, "Waiting for condition"),
     }
 
     loop {
-        match get_resource_inner(scope.clone().into_api(client.clone()), name).await {
+        match get_resource_inner(scope.into_api(client.clone()), name).await {
             Ok(Some(r)) if predicate(&r) => return Ok(r),
             Ok(Some(_)) => {
-                info!(%kind, %name, ?interval, "Condition not met, retrying");
+                debug!(%kind, %name, ?interval, "Condition not met, retrying");
                 tokio::time::sleep(interval).await;
             }
             Ok(None) => {
-                info!(%kind, %name, ?interval, "Resource not found, retrying");
+                debug!(%kind, %name, ?interval, "Resource not found, retrying");
                 tokio::time::sleep(interval).await;
             }
             Err(e) => {
                 let backoff = (interval * 2).min(Duration::from_secs(60));
-                error!(%kind, %name, error = %e, ?backoff, "API error, retrying");
+                warn!(%kind, %name, error = %e, ?backoff, "API error, retrying");
                 tokio::time::sleep(backoff).await;
             }
         }
@@ -626,8 +636,8 @@ where
 {
     let kind = T::kind(&());
     match scope.namespace() {
-        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching labels"),
-        None => info!(%kind, %name, "Patching labels"),
+        Some(ns) => debug!(namespace = %ns, %kind, %name, "Patching labels"),
+        None => debug!(%kind, %name, "Patching labels"),
     }
     let map: serde_json::Map<String, serde_json::Value> = labels
         .iter()
@@ -679,8 +689,8 @@ where
 {
     let kind = T::kind(&());
     match scope.namespace() {
-        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching annotations"),
-        None => info!(%kind, %name, "Patching annotations"),
+        Some(ns) => debug!(namespace = %ns, %kind, %name, "Patching annotations"),
+        None => debug!(%kind, %name, "Patching annotations"),
     }
     let map: serde_json::Map<String, serde_json::Value> = annotations
         .iter()
@@ -732,8 +742,8 @@ where
 {
     let kind = T::kind(&());
     match scope.namespace() {
-        Some(ns) => info!(namespace = %ns, %kind, %name, "Removing labels"),
-        None => info!(%kind, %name, "Removing labels"),
+        Some(ns) => debug!(namespace = %ns, %kind, %name, "Removing labels"),
+        None => debug!(%kind, %name, "Removing labels"),
     }
     let map: serde_json::Map<String, serde_json::Value> = keys
         .iter()
@@ -785,8 +795,8 @@ where
 {
     let kind = T::kind(&());
     match scope.namespace() {
-        Some(ns) => info!(namespace = %ns, %kind, %name, "Removing annotations"),
-        None => info!(%kind, %name, "Removing annotations"),
+        Some(ns) => debug!(namespace = %ns, %kind, %name, "Removing annotations"),
+        None => debug!(%kind, %name, "Removing annotations"),
     }
     let map: serde_json::Map<String, serde_json::Value> = keys
         .iter()

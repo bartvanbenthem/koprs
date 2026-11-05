@@ -60,7 +60,7 @@ Both reconcilers (`secretsync.rs`, `serviceaccountsync.rs`) follow the same
 shape — only the managed resource type differs:
 
 1. **Adds a finalizer** to the CR to prevent deletion before cleanup runs.
-2. **Applies the managed resource** (`ss-<cr-name>` / `sas-<cr-name>`) in the
+2. **Applies the managed resource** (`ss-<cr-namespace>-<cr-name>` / `sas-<cr-namespace>-<cr-name>`) in the
    target namespace using Server-Side Apply, labelled with
    `app.kubernetes.io/managed-by=multicontroller-<kind>sync`.
 3. **Garbage collects** stale resources previously owned by the CR.
@@ -68,7 +68,7 @@ shape — only the managed resource type differs:
    to the CR.
 5. **Patches status** — writes `ready`, `message`, and a `Ready=True` condition
    in a single SSA patch.
-6. **On deletion** — removes the synced resource, then strips the finalizer.
+6. **On deletion** — removes the synced resource, then removes its own finalizer (others stay in place).
 
 Each controller requeues every **300 seconds** for drift correction, and
 retries after **5 seconds** on error.
@@ -192,7 +192,7 @@ Cargo.toml
 |---|---|---|
 | `kube` | 4.2.0 | Kubernetes client + controller runtime |
 | `k8s-openapi` | 0.28.0 (v1_36) | Typed Kubernetes API objects |
-| `koprs` | 0.6.1 | Helper abstractions (SSA, finalizers, status patching, conditions, label patching, GC) |
+| `koprs` | workspace | Helper abstractions (SSA, finalizers, status patching, conditions, label patching, GC) |
 | `tokio` | 1.0 | Async runtime |
 | `tracing` / `tracing-subscriber` | 0.1 / 0.3 | Structured logging |
 

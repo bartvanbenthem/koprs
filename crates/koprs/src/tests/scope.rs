@@ -2,31 +2,19 @@
 //
 // Testing strategy
 // ----------------
-// Cluster and Namespaced are compile-time scope markers. Their only runtime
-// behaviour is:
+// Cluster, Namespaced and AllNamespaces are compile-time scope markers. Their
+// runtime behaviour is:
 //
-//   - namespace() → Option<&str>   (observable, assert on the value)
-//   - into_api()  → Api<K>         (not directly inspectable, but the URI
-//                                   it produces is — verified via the mock
-//                                   client in the "API construction" section)
+//   - namespace()   → Option<&str>   (assert on the value)
+//   - into_api()    → Api<K>         (verified via the URI it produces)
+//   - object_api()  → Api<K>         (verified via the URI it produces)
 //
-// ApiScope is sealed, so we cannot add new impls outside the crate. The tests
-// here confirm:
-//   1. Cluster and Namespaced implement ApiScope for the expected resource types.
-//   2. namespace() returns the correct value for each marker.
-//   3. into_api() routes to Api::all (no namespace segment) for Cluster and
-//      Api::namespaced (with namespace segment) for Namespaced.
-//   4. Both markers are Copy + Clone (structural, verified by the compiler).
+// The compile-time guarantees (Cluster rejected for namespaced types,
+// AllNamespaces rejected for single-object operations) are covered by
+// `compile_fail` doc-tests in `scope.rs`.
 //
-// Two quirks of the ApiScope trait drive most of the syntax choices:
-//
-//   a) namespace() is generic over K (lives on ApiScope<K>), so the compiler
-//      cannot infer K when calling it on a bare marker value. We use the
-//      fully-qualified path ApiScope::<K>::namespace(&marker) to disambiguate.
-//
-//   b) into_api() has no generic parameters of its own — K is on the trait.
-//      The turbofish .into_api::<K>() is therefore illegal; the correct form
-//      is ApiScope::<K>::into_api(marker, client).
+// The methods are generic over K via the trait, so the fully-qualified form
+// `ListScope::<K>::method(...)` is used to pick K.
 
 #[cfg(test)]
 mod scope_tests {
@@ -37,7 +25,7 @@ mod scope_tests {
     use serde_json::json;
     use tower_test::mock;
 
-    use crate::scope::{ApiScope, Cluster, Namespaced};
+    use crate::scope::{AllNamespaces, ApiScope, Cluster, ListScope, Namespaced};
 
     // -----------------------------------------------------------------------
     // Harness
@@ -64,163 +52,137 @@ mod scope_tests {
             .unwrap()
     }
 
+    /// Issue one list through `api` and return the request URI.
+    async fn list_uri<K>(api: kube::Api<K>, mut handle: MockHandle, kind: &'static str) -> String
+    where
+        K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            send.send_response(ok_list_response(kind));
+            uri
+        });
+        api.list(&Default::default()).await.unwrap();
+        server.await.unwrap()
+    }
+
     // -----------------------------------------------------------------------
-    // namespace() — the only runtime-observable field on the markers
-    //
-    // namespace() is a method on ApiScope<K>. Calling it as marker.namespace()
-    // leaves K ambiguous, so we use the fully-qualified form throughout.
-    // Node is used as the concrete K for Cluster tests; ConfigMap for Namespaced.
-    // The choice of K does not affect namespace() — it returns a fixed value
-    // regardless of the resource type.
+    // namespace()
     // -----------------------------------------------------------------------
 
     #[test]
     fn cluster_namespace_returns_none() {
-        assert_eq!(ApiScope::<Node>::namespace(&Cluster), None);
+        assert_eq!(ListScope::<Node>::namespace(&Cluster), None);
+    }
+
+    #[test]
+    fn all_namespaces_namespace_returns_none() {
+        assert_eq!(ListScope::<ConfigMap>::namespace(&AllNamespaces), None);
     }
 
     #[test]
     fn namespaced_namespace_returns_the_inner_str() {
         assert_eq!(
-            ApiScope::<ConfigMap>::namespace(&Namespaced("my-ns")),
+            ListScope::<ConfigMap>::namespace(&Namespaced("my-ns")),
             Some("my-ns")
         );
     }
 
     #[test]
     fn namespaced_namespace_returns_exact_str_including_edge_cases() {
-        assert_eq!(ApiScope::<ConfigMap>::namespace(&Namespaced("")), Some(""));
+        assert_eq!(ListScope::<ConfigMap>::namespace(&Namespaced("")), Some(""));
         assert_eq!(
-            ApiScope::<ConfigMap>::namespace(&Namespaced("kube-system")),
+            ListScope::<ConfigMap>::namespace(&Namespaced("kube-system")),
             Some("kube-system")
         );
-        assert_eq!(
-            ApiScope::<ConfigMap>::namespace(&Namespaced("a-b-c-123")),
-            Some("a-b-c-123")
-        );
     }
 
     // -----------------------------------------------------------------------
-    // Copy + Clone — structural, verified by the compiler
+    // Copy — structural, verified by the compiler
     // -----------------------------------------------------------------------
 
     #[test]
-    fn cluster_is_copy() {
-        let a = Cluster;
-        let b = a; // copy
-        let _ = a; // original still usable — proves Copy, not just Clone
-        let _ = b;
-    }
-
-    #[test]
-    fn cluster_is_clone() {
-        let a = Cluster;
-        let b = a.clone();
-        let _ = b;
-    }
-
-    #[test]
-    fn namespaced_is_copy() {
-        let a = Namespaced("ns");
-        let b = a; // copy
-        let _ = a; // original still usable
-        let _ = b;
-    }
-
-    #[test]
-    fn namespaced_is_clone() {
-        let a = Namespaced("ns");
-        let b = a.clone();
-        // Use fully-qualified form to disambiguate K.
-        assert_eq!(ApiScope::<ConfigMap>::namespace(&b), Some("ns"));
+    fn markers_are_copy() {
+        fn assert_copy<T: Copy>(_: T) {}
+        assert_copy(Cluster);
+        assert_copy(Namespaced("ns"));
+        assert_copy(AllNamespaces);
     }
 
     // -----------------------------------------------------------------------
-    // into_api — Cluster resolves to Api::all (no namespace in URI)
-    //
-    // K is on the trait, not on the method, so we use:
-    //   ApiScope::<K>::into_api(marker, client)
-    // rather than the illegal marker.into_api::<K>(client).
+    // into_api — URIs
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn cluster_into_api_produces_all_api_without_namespace_segment() {
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            let (req, send) = handle.next_request().await.unwrap();
-            let uri = req.uri().to_string();
-            assert!(
-                uri.contains("/api/v1/nodes"),
-                "expected cluster-scoped nodes URI, got: {uri}"
-            );
-            assert!(
-                !uri.contains("namespaces"),
-                "Api::all must not contain a namespace segment, got: {uri}"
-            );
-            send.send_response(ok_list_response("NodeList"));
-        });
-
-        let api = ApiScope::<Node>::into_api(Cluster, client);
-        api.list(&Default::default()).await.unwrap();
-
-        server.await.unwrap();
+        let (client, handle) = mock_client();
+        let api = ListScope::<Node>::into_api(Cluster, client);
+        let uri = list_uri(api, handle, "NodeList").await;
+        assert!(uri.contains("/api/v1/nodes"), "uri={uri}");
+        assert!(!uri.contains("namespaces"), "uri={uri}");
     }
-
-    // -----------------------------------------------------------------------
-    // into_api — Namespaced resolves to Api::namespaced (namespace in URI)
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn namespaced_into_api_produces_namespaced_api_with_correct_namespace() {
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            let (req, send) = handle.next_request().await.unwrap();
-            let uri = req.uri().to_string();
-            assert!(
-                uri.contains("/namespaces/prod/configmaps"),
-                "expected namespace-scoped configmaps URI, got: {uri}"
-            );
-            send.send_response(ok_list_response("ConfigMapList"));
-        });
-
-        let api = ApiScope::<ConfigMap>::into_api(Namespaced("prod"), client);
-        api.list(&Default::default()).await.unwrap();
-
-        server.await.unwrap();
+        let (client, handle) = mock_client();
+        let api = ListScope::<ConfigMap>::into_api(Namespaced("prod"), client);
+        let uri = list_uri(api, handle, "ConfigMapList").await;
+        assert!(uri.contains("/namespaces/prod/configmaps"), "uri={uri}");
     }
 
     #[tokio::test]
-    async fn namespaced_into_api_uses_exact_namespace_string() {
-        // Verifies the namespace value passed to Namespaced is forwarded
-        // verbatim to the URI — no trimming, lowercasing, or transformation.
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            let (req, send) = handle.next_request().await.unwrap();
-            let uri = req.uri().to_string();
-            assert!(
-                uri.contains("/namespaces/kube-system/configmaps"),
-                "uri={uri}"
-            );
-            send.send_response(ok_list_response("ConfigMapList"));
-        });
-
-        let api = ApiScope::<ConfigMap>::into_api(Namespaced("kube-system"), client);
-        api.list(&Default::default()).await.unwrap();
-
-        server.await.unwrap();
+    async fn all_namespaces_into_api_lists_across_namespaces() {
+        let (client, handle) = mock_client();
+        let api = ListScope::<ConfigMap>::into_api(AllNamespaces, client);
+        let uri = list_uri(api, handle, "ConfigMapList").await;
+        assert!(uri.contains("/api/v1/configmaps"), "uri={uri}");
+        assert!(!uri.contains("namespaces"), "uri={uri}");
     }
 
     // -----------------------------------------------------------------------
-    // ApiScope is implemented for the expected resource / scope combinations
+    // object_api — writes target the object's own namespace
     // -----------------------------------------------------------------------
-    //
-    // Compile-time bound witnesses. If a combination fails to compile, the
-    // impl is missing or incorrectly bounded.
+
+    #[tokio::test]
+    async fn all_namespaces_object_api_uses_the_objects_namespace() {
+        let (client, handle) = mock_client();
+        let api = ListScope::<ConfigMap>::object_api(&AllNamespaces, client, Some("team-b"));
+        let uri = list_uri(api, handle, "ConfigMapList").await;
+        assert!(uri.contains("/namespaces/team-b/configmaps"), "uri={uri}");
+    }
+
+    #[tokio::test]
+    async fn namespaced_object_api_uses_the_scope_namespace() {
+        let (client, handle) = mock_client();
+        let api = ListScope::<ConfigMap>::object_api(&Namespaced("team-a"), client, Some("team-a"));
+        let uri = list_uri(api, handle, "ConfigMapList").await;
+        assert!(uri.contains("/namespaces/team-a/configmaps"), "uri={uri}");
+    }
+
+    #[tokio::test]
+    async fn cluster_object_api_has_no_namespace_segment() {
+        let (client, handle) = mock_client();
+        let api = ListScope::<Node>::object_api(&Cluster, client, None);
+        let uri = list_uri(api, handle, "NodeList").await;
+        assert!(!uri.contains("namespaces"), "uri={uri}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Trait implementation witnesses
+    // -----------------------------------------------------------------------
 
     fn assert_api_scope<K, S: ApiScope<K>>()
+    where
+        K: kube::Resource<DynamicType = ()>
+            + Clone
+            + serde::Serialize
+            + serde::de::DeserializeOwned
+            + 'static,
+    {
+    }
+
+    fn assert_list_scope<K, S: ListScope<K>>()
     where
         K: kube::Resource<DynamicType = ()>
             + Clone
@@ -236,46 +198,12 @@ mod scope_tests {
     }
 
     #[test]
-    fn cluster_implements_api_scope_for_namespaced_resources() {
-        // Cluster wraps any resource via Api::all — useful for cross-namespace
-        // list operations.
-        assert_api_scope::<ConfigMap, Cluster>();
-    }
-
-    #[test]
     fn namespaced_implements_api_scope_for_namespaced_resources() {
         assert_api_scope::<ConfigMap, Namespaced<'_>>();
     }
 
-    // -----------------------------------------------------------------------
-    // Sealed trait — ApiScope cannot be implemented outside the crate.
-    //
-    // Enforced structurally: private::Sealed is not re-exported, so no
-    // external type can satisfy the supertrait bound. The negative case
-    // belongs in a compile_fail doc-test on ApiScope rather than here.
-    // -----------------------------------------------------------------------
-
-    // -----------------------------------------------------------------------
-    // namespace() is consistent before and after clone
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn namespaced_clone_preserves_namespace_value() {
-        let original = Namespaced("staging");
-        let cloned = original.clone();
-        assert_eq!(
-            ApiScope::<ConfigMap>::namespace(&original),
-            ApiScope::<ConfigMap>::namespace(&cloned),
-        );
-    }
-
-    #[test]
-    fn cluster_clone_namespace_is_still_none() {
-        let original = Cluster;
-        let cloned = original.clone();
-        assert_eq!(
-            ApiScope::<Node>::namespace(&original),
-            ApiScope::<Node>::namespace(&cloned),
-        );
+    fn all_namespaces_implements_list_scope_for_namespaced_resources() {
+        assert_list_scope::<ConfigMap, AllNamespaces>();
     }
 }

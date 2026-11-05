@@ -1,0 +1,79 @@
+# manifests/rbac.yaml
+#
+# Namespace, ServiceAccount and RBAC for the apiconfigsync operator.
+# Apply with: kubectl apply -f manifests/rbac.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apiconfigsync-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: apiconfigsync-operator
+  namespace: apiconfigsync-system
+---
+# Cluster-wide: the controller watches ApiConfigSync CRs in every namespace and
+# writes ConfigMaps into each CR's spec.targetNamespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: apiconfigsync-operator
+rules:
+  - apiGroups: ["example.io"]
+    resources: ["apiconfigsyncs"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["example.io"]
+    resources: ["apiconfigsyncs/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Bearer tokens are read from Secrets referenced by spec.bearerTokenSecretRef.
+  # To limit the blast radius, replace this rule with per-namespace Roles that
+  # only cover the namespaces where ApiConfigSync CRs are created.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: apiconfigsync-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: apiconfigsync-operator
+subjects:
+  - kind: ServiceAccount
+    name: apiconfigsync-operator
+    namespace: apiconfigsync-system
+---
+# Leader election Lease lives in the operator's own namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: apiconfigsync-operator-leader-election
+  namespace: apiconfigsync-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: apiconfigsync-operator-leader-election
+  namespace: apiconfigsync-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: apiconfigsync-operator-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: apiconfigsync-operator
+    namespace: apiconfigsync-system

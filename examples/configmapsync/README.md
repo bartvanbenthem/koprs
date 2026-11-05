@@ -26,24 +26,24 @@ spec:
     MAX_CONNECTIONS: "100"
 ```
 
-This will create a ConfigMap named `cms-app-config` in the `production` namespace.
+This will create a ConfigMap named `cms-default-app-config` (`cms-<cr-namespace>-<cr-name>`) in the `production` namespace.
 
 ### Reconcile loop
 
 On each reconcile the operator:
 
 1. **Adds a finalizer** to the CR to prevent deletion before cleanup runs.
-2. **Applies the ConfigMap** (`cms-<cr-name>`) in the target namespace using Server-Side Apply. The ConfigMap is labelled with `app.kubernetes.io/managed-by=configmapsync-operator`.
+2. **Applies the ConfigMap** (`cms-<cr-namespace>-<cr-name>`) in the target namespace using Server-Side Apply. The ConfigMap is labelled with `app.kubernetes.io/managed-by=configmapsync-operator` plus the owner labels `configmapsync.example.io/owner` and `configmapsync.example.io/owner-namespace`; garbage collection selects on all three, so one CR never deletes another CR's ConfigMap.
 3. **Garbage collects** any stale ConfigMaps previously owned by this CR.
 4. **Stamps a label** — adds `configmapsync.example.io/synced-to=<target-namespace>` to the CR so the sync target is visible without reading the spec.
 5. **Patches status** — writes `ready`, `message`, and a `Ready=True` condition (with `lastTransitionTime` and `observedGeneration`) in a single SSA patch. `lastTransitionTime` is preserved from the existing condition when `Ready` is already `True`, keeping the patch idempotent.
-6. **On deletion** — removes the synced ConfigMap, then strips the finalizer to allow the CR to be fully deleted.
+6. **On deletion** — removes the synced ConfigMap, then removes its own finalizer (others stay in place) to allow the CR to be fully deleted.
 
 Requeues every **300 seconds** for drift correction. Retries after **30 seconds** on error.
 
 ### Drift detection
 
-The controller also watches ConfigMaps carrying the `app.kubernetes.io/managed-by=configmapsync-operator` label. If one is modified externally (e.g. a manual `kubectl edit`), the owning CR is automatically re-queued to restore the desired state.
+The controller also watches ConfigMaps carrying the `app.kubernetes.io/managed-by=configmapsync-operator` label. If one is modified externally (e.g. a manual `kubectl edit`), the owning CR is automatically re-queued to restore the desired state. The owner is resolved from the owner labels (`owner_labels_mapper`), because the ConfigMap lives in the target namespace, not the CR's.
 
 ### Status
 
@@ -115,7 +115,7 @@ Cargo.toml
 |---|---|---|
 | `kube` | 4.2.0 | Kubernetes client + controller runtime |
 | `k8s-openapi` | 0.28.0 (v1_36) | Typed Kubernetes API objects |
-| `koprs` | 0.6.1 | Helper abstractions (SSA, finalizers, status patching, conditions, label patching, GC) |
+| `koprs` | workspace | Helper abstractions (SSA, finalizers, status patching, conditions, label patching, GC) |
 | `tokio` | 1.0 | Async runtime |
 | `tracing` / `tracing-subscriber` | 0.1 / 0.3 | Structured logging |
 

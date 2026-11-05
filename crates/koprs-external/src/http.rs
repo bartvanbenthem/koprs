@@ -19,6 +19,16 @@
 //! [`HttpPoller::with_header`]. Bring your own pre-configured
 //! [`reqwest::Client`] via [`HttpPoller::with_client`] for mutual TLS,
 //! custom timeouts, or connection pool settings.
+//!
+//! # Timeouts
+//!
+//! The default client applies a [`DEFAULT_REQUEST_TIMEOUT`] (30 s) per request
+//! and a [`DEFAULT_CONNECT_TIMEOUT`] (10 s), so an endpoint that accepts the
+//! connection but never answers cannot stall the watcher forever. A client
+//! passed to [`HttpPoller::with_client`] is used as-is — configure timeouts on
+//! it yourself.
+
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -35,6 +45,49 @@ use crate::{
     error::{ExternalError, Result},
     watcher::{ExternalEvent, ExternalSource},
 };
+
+/// Total per-request timeout of the default client built by [`HttpPoller::new`].
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Connect timeout of the default client built by [`HttpPoller::new`].
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The default client: bounded request and connect timeouts.
+fn default_client(timeout: Duration) -> Client {
+    Client::builder()
+        .timeout(timeout)
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT.min(timeout))
+        .build()
+        // Same failure mode as `reqwest::Client::new()`, which also panics if
+        // the TLS backend cannot be initialised.
+        .expect("failed to build HTTP client")
+}
+
+/// Read a response body, enforcing an optional size limit while streaming.
+async fn read_body(
+    mut response: reqwest::Response,
+    max: Option<usize>,
+    url: &str,
+) -> Result<Bytes> {
+    let Some(max) = max else {
+        return Ok(response.bytes().await?);
+    };
+    let too_large =
+        || ExternalError::Internal(format!("response body from {url} exceeds {max} bytes"));
+    if response
+        .content_length()
+        .is_some_and(|len| len > max as u64)
+    {
+        return Err(too_large());
+    }
+    let mut buf = bytes::BytesMut::new();
+    while let Some(chunk) = response.chunk().await? {
+        if buf.len() + chunk.len() > max {
+            return Err(too_large());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf.freeze())
+}
 
 // ---------------------------------------------------------------------------
 // HttpResponse
@@ -100,23 +153,28 @@ pub struct HttpPoller {
     last_etag: Option<String>,
     last_modified_value: Option<String>,
     seen: bool,
+    max_body_bytes: Option<usize>,
 }
 
 impl HttpPoller {
-    /// Create a new poller for the given URL using a default [`reqwest::Client`].
+    /// Create a new poller for the given URL using a default [`reqwest::Client`]
+    /// with a 30 s request timeout and 10 s connect timeout.
     ///
-    /// Call [`with_client`][Self::with_client] to bring a pre-configured
-    /// client (e.g. one with custom CA certificates or timeouts).
+    /// Call [`with_timeout`][Self::with_timeout] to change the timeout, or
+    /// [`with_client`][Self::with_client] to bring a pre-configured client
+    /// (e.g. one with custom CA certificates or connection pooling shared
+    /// across pollers).
     pub fn new(url: impl Into<String>) -> Self {
         let url = url.into();
         Self {
             name: url.clone(),
-            client: Client::new(),
+            client: default_client(DEFAULT_REQUEST_TIMEOUT),
             url,
             extra_headers: Vec::new(),
             last_etag: None,
             last_modified_value: None,
             seen: false,
+            max_body_bytes: None,
         }
     }
 
@@ -126,10 +184,31 @@ impl HttpPoller {
         self
     }
 
+    /// Reject responses whose body exceeds `max` bytes (default: unlimited).
+    ///
+    /// The limit is enforced while streaming, so an oversized or endless
+    /// response is cut off instead of being buffered in memory. A response
+    /// over the limit makes [`poll`](ExternalSource::poll) return an error.
+    pub fn with_max_body_size(mut self, max: usize) -> Self {
+        self.max_body_bytes = Some(max);
+        self
+    }
+
+    /// Replace the default client with one using a different per-request
+    /// timeout (connect timeout stays at most 10 s).
+    ///
+    /// Replaces any client set earlier with [`with_client`](Self::with_client).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.client = default_client(timeout);
+        self
+    }
+
     /// Replace the underlying HTTP client.
     ///
-    /// Use this to apply custom TLS certificates, proxy settings, or
-    /// connection timeouts. The client must have `rustls-tls` or
+    /// Use this to apply custom TLS certificates, proxy settings, or to share
+    /// one connection pool across many pollers. The client is used as-is:
+    /// **configure a request timeout on it**, otherwise a hung endpoint can
+    /// block the poll indefinitely. The client must have `rustls-tls` or
     /// `native-tls` enabled to handle HTTPS endpoints.
     pub fn with_client(mut self, client: Client) -> Self {
         self.client = client;
@@ -229,7 +308,7 @@ impl ExternalSource for HttpPoller {
                         .and_then(|v| v.to_str().ok())
                         .map(String::from);
                     let status = response.status().as_u16();
-                    let body = response.bytes().await?;
+                    let body = read_body(response, this.max_body_bytes, &this.url).await?;
 
                     let http_response = HttpResponse {
                         body,

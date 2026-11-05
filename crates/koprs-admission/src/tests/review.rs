@@ -155,6 +155,46 @@ mod review_tests {
     }
 
     #[test]
+    fn parse_request_extracts_kind_resource_and_user_info() {
+        let mut body = admission_review("UPDATE", None);
+        body["request"]["kind"] = json!({ "group": "apps", "version": "v1", "kind": "Deployment" });
+        body["request"]["resource"] =
+            json!({ "group": "apps", "version": "v1", "resource": "deployments" });
+        body["request"]["subResource"] = json!("scale");
+        body["request"]["requestKind"] =
+            json!({ "group": "apps", "version": "v1beta1", "kind": "Deployment" });
+        body["request"]["userInfo"] = json!({
+            "username": "system:serviceaccount:ops:my-operator",
+            "uid": "u-1",
+            "groups": ["system:serviceaccounts", "system:authenticated"],
+            "extra": { "scopes": ["a", "b"] }
+        });
+
+        let req = parse_request::<Dummy>(&body).unwrap();
+        assert_eq!(req.kind.group, "apps");
+        assert_eq!(req.kind.kind, "Deployment");
+        assert_eq!(req.resource.resource, "deployments");
+        assert_eq!(req.sub_resource.as_deref(), Some("scale"));
+        assert_eq!(req.request_kind.unwrap().version, "v1beta1");
+        assert!(req.request_resource.is_none());
+        assert_eq!(
+            req.user_info.username,
+            "system:serviceaccount:ops:my-operator"
+        );
+        assert_eq!(req.user_info.groups.len(), 2);
+        assert_eq!(req.user_info.extra["scopes"], vec!["a", "b"]);
+    }
+
+    #[test]
+    fn parse_request_defaults_identity_fields_when_absent() {
+        let body = admission_review("CREATE", None);
+        let req = parse_request::<Dummy>(&body).unwrap();
+        assert_eq!(req.user_info, Default::default());
+        assert_eq!(req.kind, Default::default());
+        assert!(req.sub_resource.is_none());
+    }
+
+    #[test]
     fn parse_request_returns_error_when_request_field_missing() {
         let body = json!({ "kind": "AdmissionReview" });
         let result = parse_request::<Dummy>(&body);

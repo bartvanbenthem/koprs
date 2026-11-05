@@ -7,6 +7,9 @@
 //! [`Operation`] distinguishes the Kubernetes API verb that triggered the
 //! admission request (CREATE, UPDATE, DELETE, CONNECT).
 
+use std::collections::BTreeMap;
+
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -66,10 +69,30 @@ impl Operation {
 ///     }
 /// }
 /// ```
+#[derive(Debug, Clone)]
 pub struct AdmissionRequest<T> {
     /// The unique identifier of this admission request, echoed back in the
     /// response so Kubernetes can correlate the two.
     pub uid: String,
+    /// Fully-qualified kind of the object being admitted (e.g.
+    /// `apps/v1, Kind=Deployment`).
+    pub kind: GroupVersionKind,
+    /// Fully-qualified resource being admitted (e.g. `apps/v1, deployments`).
+    pub resource: GroupVersionResource,
+    /// Subresource being requested, if any (e.g. `status`, `scale`).
+    pub sub_resource: Option<String>,
+    /// The kind of the original API request, when it differs from
+    /// [`kind`](Self::kind) because of a webhook `matchPolicy: Equivalent`.
+    pub request_kind: Option<GroupVersionKind>,
+    /// The resource of the original API request, when it differs from
+    /// [`resource`](Self::resource).
+    pub request_resource: Option<GroupVersionResource>,
+    /// The subresource of the original API request.
+    pub request_sub_resource: Option<String>,
+    /// The authenticated user (or service account) making the request.
+    /// Use it for identity-aware rules such as "only the operator's service
+    /// account may change `spec.owner`".
+    pub user_info: UserInfo,
     /// Name of the resource being admitted.
     pub name: String,
     /// Namespace of the resource, or `None` for cluster-scoped resources.
@@ -83,6 +106,44 @@ pub struct AdmissionRequest<T> {
     pub old_object: Option<T>,
     /// Whether the request is a dry-run (the resource will not be persisted).
     pub dry_run: bool,
+}
+
+/// A Kubernetes group / version / kind triple.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct GroupVersionKind {
+    /// API group; empty for the core group.
+    pub group: String,
+    /// API version, e.g. `v1`.
+    pub version: String,
+    /// Kind, e.g. `Deployment`.
+    pub kind: String,
+}
+
+/// A Kubernetes group / version / resource triple.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct GroupVersionResource {
+    /// API group; empty for the core group.
+    pub group: String,
+    /// API version, e.g. `v1`.
+    pub version: String,
+    /// Plural resource name, e.g. `deployments`.
+    pub resource: String,
+}
+
+/// Identity of the requester, as authenticated by the API server.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct UserInfo {
+    /// User name, e.g. `system:serviceaccount:ops:my-operator`.
+    pub username: String,
+    /// Unique user ID.
+    pub uid: String,
+    /// Groups the user belongs to.
+    pub groups: Vec<String>,
+    /// Extra attributes from the authenticator.
+    pub extra: BTreeMap<String, Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,8 +285,23 @@ pub(crate) fn parse_request<T: DeserializeOwned>(body: &Value) -> Result<Admissi
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    let string_field = |key: &str| {
+        request
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+
     Ok(AdmissionRequest {
         uid,
+        kind: optional_field(request, "kind")?.unwrap_or_default(),
+        resource: optional_field(request, "resource")?.unwrap_or_default(),
+        sub_resource: string_field("subResource"),
+        request_kind: optional_field(request, "requestKind")?,
+        request_resource: optional_field(request, "requestResource")?,
+        request_sub_resource: string_field("requestSubResource"),
+        user_info: optional_field(request, "userInfo")?.unwrap_or_default(),
         name,
         namespace,
         operation,
@@ -233,6 +309,16 @@ pub(crate) fn parse_request<T: DeserializeOwned>(body: &Value) -> Result<Admissi
         old_object,
         dry_run,
     })
+}
+
+/// Deserialize an optional, possibly-null object field.
+fn optional_field<F: DeserializeOwned>(request: &Value, key: &str) -> Result<Option<F>> {
+    request
+        .get(key)
+        .filter(|v| !v.is_null())
+        .map(|v| F::deserialize(v))
+        .transpose()
+        .map_err(AdmissionError::Serialization)
 }
 
 /// Build an `AdmissionReview` response JSON from a [`ValidationResponse`].

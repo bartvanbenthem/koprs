@@ -26,13 +26,13 @@
 
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace};
 use k8s_openapi::api::rbac::v1::ClusterRole;
-use koprs::finalizers::{add_finalizer, add_finalizer_namespaced, remove_finalizers};
+use koprs::finalizers::{add_finalizer, add_finalizer_namespaced, remove_finalizer};
 use koprs::gc::gc_resources;
 use koprs::meta::ObjectMetaBuilder;
 use koprs::resources::{
     apply_resource, delete_resource, ensure_namespace, list_resource_names, list_resources_scoped,
 };
-use koprs::scope::{Cluster, Namespaced};
+use koprs::scope::{AllNamespaces, Cluster, Namespaced};
 use koprs::status::{patch_status_cluster, patch_status_namespaced};
 use kube::api::ListParams;
 use kube::{Api, Client, ResourceExt};
@@ -280,7 +280,7 @@ async fn test_list_resources_by_label() {
     let selector = format!("koprs-test={}", label_value);
     let list = list_resources_scoped::<ConfigMap, _>(
         client.clone(),
-        Cluster,
+        AllNamespaces,
         ListParams::default().labels(&selector),
     )
     .await
@@ -465,10 +465,15 @@ async fn test_add_and_remove_namespaced_finalizer() {
         "Finalizer not present after add"
     );
 
-    // Remove all finalizers via the generic form
-    let without_fin = remove_finalizers::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
-        .await
-        .expect("remove_finalizers (namespaced) failed");
+    // Remove our finalizer via the generic form
+    let without_fin = remove_finalizer::<ConfigMap, _>(
+        client.clone(),
+        Namespaced(ns),
+        &with_fin,
+        "koprs/finalizer",
+    )
+    .await
+    .expect("remove_finalizer (namespaced) failed");
 
     assert!(
         without_fin
@@ -514,10 +519,10 @@ async fn test_add_and_remove_cluster_finalizer() {
         "Finalizer not present after add"
     );
 
-    // Remove all finalizers before deleting (otherwise the object gets stuck)
-    remove_finalizers::<ClusterRole, _>(client.clone(), Cluster, &name)
+    // Remove our finalizer before deleting (otherwise the object gets stuck)
+    remove_finalizer::<ClusterRole, _>(client.clone(), Cluster, &with_fin, "koprs/finalizer")
         .await
-        .expect("remove_finalizers (cluster) failed");
+        .expect("remove_finalizer (cluster) failed");
 
     delete_resource::<ClusterRole, _>(client.clone(), Cluster, &name)
         .await
@@ -674,4 +679,349 @@ async fn test_gc_does_not_delete_desired_resources() {
     delete_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &name)
         .await
         .ok();
+}
+
+// =========================================================================
+// Finalizers — coexistence with other controllers
+// =========================================================================
+
+/// Strip every finalizer so test objects never get stuck.
+async fn force_clear_finalizers(api: &Api<ConfigMap>, name: &str) {
+    let patch = serde_json::json!({ "metadata": { "finalizers": null } });
+    api.patch(
+        name,
+        &kube::api::PatchParams::default(),
+        &kube::api::Patch::Merge(&patch),
+    )
+    .await
+    .ok();
+}
+
+#[tokio::test]
+async fn test_remove_finalizer_keeps_other_controllers_finalizers() {
+    let client = client().await;
+    let ns = "default";
+    let name = uid("koprs-fin-coexist");
+    let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+
+    let cm = apply_resource::<ConfigMap, _>(
+        client.clone(),
+        Namespaced(ns),
+        &configmap(&name, ns, None),
+        "koprs-test",
+    )
+    .await
+    .unwrap();
+    let cm = add_finalizer_namespaced::<ConfigMap>(client.clone(), &cm, "other.io/keep")
+        .await
+        .unwrap();
+    let cm = add_finalizer_namespaced::<ConfigMap>(client.clone(), &cm, "koprs/finalizer")
+        .await
+        .unwrap();
+
+    let after =
+        remove_finalizer::<ConfigMap, _>(client.clone(), Namespaced(ns), &cm, "koprs/finalizer")
+            .await
+            .expect("remove_finalizer failed");
+    assert_eq!(
+        after.metadata.finalizers.unwrap_or_default(),
+        vec!["other.io/keep".to_string()],
+        "another controller's finalizer must survive"
+    );
+
+    force_clear_finalizers(&api, &name).await;
+    api.delete(&name, &Default::default()).await.ok();
+}
+
+#[tokio::test]
+async fn test_add_finalizer_with_stale_copy_does_not_overwrite_concurrent_change() {
+    let client = client().await;
+    let ns = "default";
+    let name = uid("koprs-fin-stale");
+    let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+
+    let stale = apply_resource::<ConfigMap, _>(
+        client.clone(),
+        Namespaced(ns),
+        &configmap(&name, ns, None),
+        "koprs-test",
+    )
+    .await
+    .unwrap();
+
+    // Another controller adds its finalizer using a fresh copy...
+    add_finalizer_namespaced::<ConfigMap>(client.clone(), &stale, "other.io/keep")
+        .await
+        .unwrap();
+
+    // ...then we try with our stale copy (no finalizers): must be rejected.
+    let result =
+        add_finalizer_namespaced::<ConfigMap>(client.clone(), &stale, "koprs/finalizer").await;
+    assert!(
+        result.is_err(),
+        "stale add must fail instead of overwriting"
+    );
+
+    let live = api.get(&name).await.unwrap();
+    assert_eq!(
+        live.metadata.finalizers.unwrap_or_default(),
+        vec!["other.io/keep".to_string()]
+    );
+
+    force_clear_finalizers(&api, &name).await;
+    api.delete(&name, &Default::default()).await.ok();
+}
+
+// =========================================================================
+// GC — multiple owners, multiple namespaces, foreign finalizers
+// =========================================================================
+
+#[tokio::test]
+async fn test_gc_with_owner_scoped_selectors_does_not_touch_other_owners() {
+    let client = client().await;
+    let ns = "default";
+    let run = uid("gc-owners");
+    let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+
+    // Two CRs ("a" and "b") each own one ConfigMap in the same namespace.
+    for owner in ["a", "b"] {
+        let mut cm = configmap(&format!("{run}-{owner}"), ns, Some(&run));
+        cm.metadata
+            .labels
+            .get_or_insert_default()
+            .insert("koprs-test/owner".into(), owner.into());
+        apply_resource::<ConfigMap, _>(client.clone(), Namespaced(ns), &cm, "koprs-test")
+            .await
+            .unwrap();
+    }
+
+    // GC for owner "a" with nothing desired: only a's ConfigMap may go.
+    let selector_a = format!("koprs-test={run},koprs-test/owner=a");
+    gc_resources::<ConfigMap, _>(client.clone(), Namespaced(ns), &selector_a, |_| false)
+        .await
+        .unwrap();
+
+    assert!(
+        api.get_opt(&format!("{run}-b")).await.unwrap().is_some(),
+        "owner b's ConfigMap was deleted"
+    );
+    assert!(
+        api.get_opt(&format!("{run}-a")).await.unwrap().is_none(),
+        "owner a's orphan survived"
+    );
+
+    api.delete(&format!("{run}-b"), &Default::default())
+        .await
+        .ok();
+}
+
+#[tokio::test]
+async fn test_gc_all_namespaces_deletes_each_object_in_its_own_namespace() {
+    let client = client().await;
+    let run = uid("gc-allns");
+    let ns_a = format!("{run}-a");
+    let ns_b = format!("{run}-b");
+    for ns in [&ns_a, &ns_b] {
+        ensure_namespace(client.clone(), ns, "koprs-test")
+            .await
+            .unwrap();
+    }
+
+    // Same object name in both namespaces.
+    for ns in [&ns_a, &ns_b] {
+        apply_resource::<ConfigMap, _>(
+            client.clone(),
+            Namespaced(ns),
+            &configmap("dup", ns, Some(&run)),
+            "koprs-test",
+        )
+        .await
+        .unwrap();
+    }
+
+    let selector = format!("koprs-test={run}");
+    gc_resources::<ConfigMap, _>(client.clone(), AllNamespaces, &selector, |cm| {
+        cm.namespace().as_deref() == Some(ns_b.as_str())
+    })
+    .await
+    .unwrap();
+
+    let api_a: Api<ConfigMap> = Api::namespaced(client.clone(), &ns_a);
+    let api_b: Api<ConfigMap> = Api::namespaced(client.clone(), &ns_b);
+    assert!(
+        api_a.get_opt("dup").await.unwrap().is_none(),
+        "orphan in ns_a survived"
+    );
+    assert!(
+        api_b.get_opt("dup").await.unwrap().is_some(),
+        "desired object in ns_b was deleted"
+    );
+
+    let ns_api: Api<Namespace> = Api::all(client.clone());
+    for ns in [&ns_a, &ns_b] {
+        ns_api.delete(ns, &Default::default()).await.ok();
+    }
+}
+
+#[tokio::test]
+async fn test_gc_does_not_strip_foreign_finalizers() {
+    let client = client().await;
+    let ns = "default";
+    let run = uid("gc-foreign-fin");
+    let name = format!("{run}-cm");
+    let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+
+    let cm = apply_resource::<ConfigMap, _>(
+        client.clone(),
+        Namespaced(ns),
+        &configmap(&name, ns, Some(&run)),
+        "koprs-test",
+    )
+    .await
+    .unwrap();
+    add_finalizer_namespaced::<ConfigMap>(client.clone(), &cm, "other.io/keep")
+        .await
+        .unwrap();
+
+    let selector = format!("koprs-test={run}");
+    // First pass deletes; second pass sees it terminating and must skip it.
+    for _ in 0..2 {
+        gc_resources::<ConfigMap, _>(client.clone(), Namespaced(ns), &selector, |_| false)
+            .await
+            .unwrap();
+    }
+
+    let live = api
+        .get(&name)
+        .await
+        .expect("object must still exist while finalizer is pending");
+    assert!(
+        live.metadata.deletion_timestamp.is_some(),
+        "GC should have requested deletion"
+    );
+    assert_eq!(
+        live.metadata.finalizers.unwrap_or_default(),
+        vec!["other.io/keep".to_string()],
+        "GC must not remove another controller's finalizer"
+    );
+
+    force_clear_finalizers(&api, &name).await;
+}
+
+// =========================================================================
+// Leader election — two replicas, one leader, failover
+// =========================================================================
+
+mod leader_election {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use k8s_openapi::api::coordination::v1::Lease;
+    use k8s_openapi::api::core::v1::ConfigMap;
+    use koprs::controller::{Action, Context, ControllerBuilder, Reconciler};
+    use koprs::error::KubeGenericError;
+    use kube::Api;
+
+    use super::{client, configmap, uid};
+
+    struct Counting(Arc<AtomicUsize>);
+
+    impl Reconciler<ConfigMap> for Counting {
+        type Error = KubeGenericError;
+        async fn reconcile(
+            &self,
+            _cr: Arc<ConfigMap>,
+            _ctx: Arc<Context>,
+        ) -> Result<Action, KubeGenericError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Action::requeue(Duration::from_millis(200)))
+        }
+    }
+
+    fn replica(
+        client: kube::Client,
+        ns: &str,
+        lease: &str,
+        selector: &str,
+        identity: &str,
+        counter: Arc<AtomicUsize>,
+    ) -> tokio::task::JoinHandle<koprs::error::Result<()>> {
+        let api: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+        let builder = ControllerBuilder::new(api)
+            .label_selector(selector)
+            .leader_election(ns, lease)
+            .leader_election_identity(identity)
+            .leader_election_timings(
+                Duration::from_secs(3),
+                Duration::from_secs(2),
+                Duration::from_millis(300),
+            );
+        let ctx = Context::new(client);
+        tokio::spawn(builder.run(Counting(counter), ctx))
+    }
+
+    #[tokio::test]
+    async fn test_only_one_replica_reconciles_and_standby_takes_over() {
+        let client = client().await;
+        let ns = "default";
+        let run = uid("koprs-le");
+        let selector = format!("koprs-test={run}");
+        koprs::resources::apply_resource::<ConfigMap, _>(
+            client.clone(),
+            koprs::scope::Namespaced(ns),
+            &configmap(&format!("{run}-cm"), ns, Some(&run)),
+            "koprs-test",
+        )
+        .await
+        .unwrap();
+
+        let a = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(AtomicUsize::new(0));
+        let task_a = replica(client.clone(), ns, &run, &selector, "replica-a", a.clone());
+        // Give replica-a a head start so it becomes the leader.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let task_b = replica(client.clone(), ns, &run, &selector, "replica-b", b.clone());
+
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(a.load(Ordering::SeqCst) > 0, "leader never reconciled");
+        assert_eq!(
+            b.load(Ordering::SeqCst),
+            0,
+            "standby reconciled while not leader"
+        );
+
+        // Kill the leader without releasing the lease (simulates a crash).
+        task_a.abort();
+        let _ = task_a.await;
+
+        // The standby must take over after roughly the lease duration.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while b.load(Ordering::SeqCst) == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "standby never took over"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        let lease = Api::<Lease>::namespaced(client.clone(), ns)
+            .get(&run)
+            .await
+            .unwrap();
+        assert_eq!(
+            lease.spec.unwrap().holder_identity.as_deref(),
+            Some("replica-b")
+        );
+
+        task_b.abort();
+        Api::<Lease>::namespaced(client.clone(), ns)
+            .delete(&run, &Default::default())
+            .await
+            .ok();
+        Api::<ConfigMap>::namespaced(client, ns)
+            .delete(&format!("{run}-cm"), &Default::default())
+            .await
+            .ok();
+    }
 }

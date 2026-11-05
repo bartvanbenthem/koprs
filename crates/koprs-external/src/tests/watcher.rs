@@ -259,4 +259,57 @@ mod watcher_tests {
 
         assert!(matches!(ev, ExternalEvent::Added(_)));
     }
+
+    // -----------------------------------------------------------------------
+    // poll_timeout — a hung source does not stall the watcher
+    // -----------------------------------------------------------------------
+
+    /// Hangs forever on the first poll, then emits one event.
+    struct HangOnceSource {
+        calls: u32,
+    }
+
+    impl ExternalSource for HangOnceSource {
+        type Item = String;
+
+        fn poll(&mut self) -> BoxFuture<'_, Result<Vec<ExternalEvent<String>>>> {
+            self.calls += 1;
+            let first = self.calls == 1;
+            Box::pin(async move {
+                if first {
+                    std::future::pending::<()>().await;
+                }
+                Ok(vec![ExternalEvent::Added("recovered".to_string())])
+            })
+        }
+
+        fn name(&self) -> &str {
+            "hang-once"
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_timeout_recovers_from_a_hung_poll() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let config = WatchConfig::new(Duration::from_millis(10))
+            .with_poll_timeout(Duration::from_millis(50))
+            .with_max_backoff(Duration::from_millis(20));
+        let handle = watch_external_with_config(HangOnceSource { calls: 0 }, config, tx);
+
+        let event = timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("watcher stalled on the hung poll")
+            .unwrap();
+        assert!(matches!(event, ExternalEvent::Added(ref s) if s == "recovered"));
+        handle.abort();
+    }
+
+    #[test]
+    fn watch_config_poll_timeout_defaults_to_none() {
+        assert!(
+            WatchConfig::new(Duration::from_secs(1))
+                .poll_timeout
+                .is_none()
+        );
+    }
 }

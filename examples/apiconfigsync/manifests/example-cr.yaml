@@ -1,0 +1,27 @@
+# manifests/example-cr.yaml
+#
+# Example ApiConfigSync CR plus the Secret holding its bearer token.
+# The Secret must live in the same namespace as the CR.
+# Apply with: kubectl apply -f manifests/example-cr.yaml
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: config-api-token
+  namespace: default
+type: Opaque
+stringData:
+  token: my-api-token
+---
+apiVersion: example.io/v1alpha1
+kind: ApiConfigSync
+metadata:
+  name: app-config
+  namespace: default
+spec:
+  targetNamespace: production
+  apiUrl: https://config.example.com/api/v1/settings
+  bearerTokenSecretRef:
+    name: config-api-token
+    key: token
+  configKey: settings.json

@@ -39,11 +39,11 @@ mod webhook_tests {
     impl Validator<TestResource> for AlwaysAllow {
         type Error = std::convert::Infallible;
 
-        fn validate(
+        async fn validate(
             &self,
             _request: &AdmissionRequest<TestResource>,
-        ) -> impl Future<Output = Result<ValidationResponse, Self::Error>> + Send {
-            async { Ok(ValidationResponse::allow()) }
+        ) -> Result<ValidationResponse, Self::Error> {
+            Ok(ValidationResponse::allow())
         }
     }
 
@@ -52,11 +52,11 @@ mod webhook_tests {
     impl Validator<TestResource> for AlwaysDeny {
         type Error = std::convert::Infallible;
 
-        fn validate(
+        async fn validate(
             &self,
             _request: &AdmissionRequest<TestResource>,
-        ) -> impl Future<Output = Result<ValidationResponse, Self::Error>> + Send {
-            async { Ok(ValidationResponse::deny("always denied")) }
+        ) -> Result<ValidationResponse, Self::Error> {
+            Ok(ValidationResponse::deny("always denied"))
         }
     }
 
@@ -100,11 +100,11 @@ mod webhook_tests {
     impl Validator<TestResource> for ErrorValidator {
         type Error = ValidatorError;
 
-        fn validate(
+        async fn validate(
             &self,
             _request: &AdmissionRequest<TestResource>,
-        ) -> impl Future<Output = Result<ValidationResponse, Self::Error>> + Send {
-            async { Err(ValidatorError) }
+        ) -> Result<ValidationResponse, Self::Error> {
+            Err(ValidatorError)
         }
     }
 
@@ -389,5 +389,142 @@ mod webhook_tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
         let after = http_get(port, "/readyz").await;
         assert!(after.starts_with("HTTP/1.1 200"), "expected 200: {after}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Hardening: request timeout, body limit, graceful drain
+    // -----------------------------------------------------------------------
+
+    struct Slow(Duration);
+
+    impl Validator<TestResource> for Slow {
+        type Error = std::convert::Infallible;
+
+        fn validate(
+            &self,
+            _request: &AdmissionRequest<TestResource>,
+        ) -> impl Future<Output = Result<ValidationResponse, Self::Error>> + Send {
+            let d = self.0;
+            async move {
+                tokio::time::sleep(d).await;
+                Ok(ValidationResponse::allow())
+            }
+        }
+    }
+
+    fn builder_router(builder: WebhookBuilder) -> axum::Router {
+        WebhookBuilder::router(builder.routes, builder.request_timeout)
+    }
+
+    #[tokio::test]
+    async fn validator_exceeding_request_timeout_gets_500() {
+        let b = WebhookBuilder::new()
+            .request_timeout(Duration::from_millis(50))
+            .validate("/v", Slow(Duration::from_secs(5)));
+        let resp = builder_router(b)
+            .oneshot(post_json("/v", make_review("CREATE", 1, "x")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn request_within_timeout_is_answered() {
+        let b = WebhookBuilder::new()
+            .request_timeout(Duration::from_secs(2))
+            .validate("/v", Slow(Duration::from_millis(10)));
+        let v = response_json(
+            builder_router(b),
+            post_json("/v", make_review("CREATE", 1, "x")),
+        )
+        .await;
+        assert_eq!(v["response"]["allowed"], true);
+    }
+
+    #[tokio::test]
+    async fn large_update_reviews_above_axum_default_limit_are_accepted() {
+        // axum's default 2 MiB body limit would reject UPDATE reviews of
+        // large objects (object + oldObject).
+        let big = "x".repeat(3 * 1024 * 1024);
+        let b = WebhookBuilder::new().validate("/v", AlwaysAllow);
+        let v = response_json(
+            builder_router(b),
+            post_json("/v", make_review("UPDATE", 1, &big)),
+        )
+        .await;
+        assert_eq!(v["response"]["allowed"], true);
+    }
+
+    #[tokio::test]
+    async fn bodies_above_the_limit_are_rejected() {
+        let huge = "x".repeat(9 * 1024 * 1024);
+        let b = WebhookBuilder::new().validate("/v", AlwaysAllow);
+        let resp = builder_router(b)
+            .oneshot(post_json("/v", make_review("UPDATE", 1, &huge)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_in_flight_requests_before_returning() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let b = WebhookBuilder::new().validate("/v", Slow(Duration::from_millis(300)));
+        let router = builder_router(b);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(crate::webhook::serve(listener, None, router, rx));
+
+        let body = serde_json::to_vec(&make_review("CREATE", 1, "x")).unwrap();
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let head = format!(
+            "POST /v HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+
+        // Request is now in flight inside the slow validator; shut down.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.send(true).unwrap();
+
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).await.unwrap();
+        let resp = String::from_utf8_lossy(&resp);
+        assert!(
+            resp.starts_with("HTTP/1.1 200"),
+            "in-flight request was cut off: {resp}"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("serve() did not return after draining")
+            .unwrap();
+
+        // The listener is closed: new connections are refused.
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_request_timeout_defaults_to_10s() {
+        assert_eq!(
+            WebhookBuilder::new().request_timeout,
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn run_future_is_send_so_it_can_be_spawned() {
+        fn assert_send<T: Send>(_: &T) {}
+        let fut = WebhookBuilder::new().validate("/v", AlwaysAllow).run();
+        assert_send(&fut);
     }
 }

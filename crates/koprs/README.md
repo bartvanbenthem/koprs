@@ -58,12 +58,13 @@ The three pieces fit together: implement `Reconciler` to define your business lo
 
 | Method | What it provides |
 |--------|-----------------|
-| `.health_port(port)` | `GET /healthz` (liveness) + `GET /readyz` (readiness) HTTP server |
-| `.metrics_port(port)` | `GET /metrics` Prometheus endpoint — reconcile counts, error counts, and duration histograms, recorded automatically around every reconcile |
-| `.graceful_shutdown()` | Clean stop on SIGTERM or Ctrl+C |
-| `.leader_election(ns, name)` | Kubernetes Lease-based HA — only one replica reconciles at a time |
-| `.leader_election_timings(dur, renew, retry)` | Override lease duration, renew period, and retry period (call after `.leader_election()`) |
-| `.reconcile_timeout(dur)` | Cancel and requeue reconciles that exceed the duration |
+| `.health_port(port)` | `GET /healthz` (liveness) + `GET /readyz` (readiness, ready once started — standby replicas included — and unready after a shutdown signal) |
+| `.metrics_port(port)` | `GET /metrics` Prometheus endpoint — reconcile counts, error counts (labelled by a bounded `Reconciler::error_label`), and duration histograms, recorded automatically around every reconcile |
+| `.graceful_shutdown()` | On SIGTERM / Ctrl+C: stop scheduling, let in-flight reconciles finish, release the leader lease |
+| `.leader_election(ns, name)` | Kubernetes Lease-based HA — only one replica reconciles at a time (see below) |
+| `.leader_election_timings(lease, renew_deadline, retry)` | Override lease duration (15s), renew deadline (10s) and retry period (2s); validated as `lease > renew_deadline > retry` |
+| `.leader_election_identity(id)` | Override the identity (defaults to `$POD_NAME`, then `$HOSTNAME`) |
+| `.reconcile_timeout(dur)` | Cancel and requeue reconciles that exceed the duration (counted as `error="timeout"`) |
 | `.concurrency(n)` | Cap concurrent reconciles across all objects (default: unbounded; a single object is never reconciled concurrently regardless) |
 | `.watch(api, config, mapper)` | Trigger re-queues from a secondary resource via a mapper function; calls compose |
 | `.owns(api, config)` | Trigger re-queues from a child resource via Kubernetes owner references |
@@ -77,7 +78,7 @@ use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{Api, Client};
 use koprs::controller::{Context, ControllerBuilder, watcher};
-use koprs::owners::owner_label_mapper;
+use koprs::owners::owner_labels_mapper;
 
 let client = Client::try_default().await?;
 let ctx = Context::new(client.clone());
@@ -88,18 +89,18 @@ ControllerBuilder::new(Api::<MyCR>::all(client.clone()))
         Api::<Deployment>::all(client.clone()),
         watcher::Config::default(),
     )
-    // re-queue the CR whenever a managed ConfigMap carrying the owner label changes
+    // re-queue the CR whenever a managed ConfigMap carrying the owner labels changes
     .watch(
         Api::<ConfigMap>::all(client.clone()),
         watcher::Config::default().labels("app.kubernetes.io/managed-by=my-operator"),
-        owner_label_mapper("my-operator/owner"),
+        owner_labels_mapper("my-operator/owner", "my-operator/owner-namespace"),
     )
     .health_port(8080)
     .graceful_shutdown()
     .leader_election("my-namespace", "my-operator-leader")
     .leader_election_timings(
         Duration::from_secs(15), // lease duration
-        Duration::from_secs(5),  // renew period
+        Duration::from_secs(10), // renew deadline
         Duration::from_secs(2),  // retry period
     )
     .reconcile_timeout(Duration::from_secs(120))
@@ -107,6 +108,15 @@ ControllerBuilder::new(Api::<MyCR>::all(client.clone()))
     .run(MyReconciler, ctx)
     .await?;
 ```
+
+#### Leader election semantics
+
+The implementation follows client-go's `leaderelection` package:
+
+- **Clock-skew safe.** Candidates judge expiry with their own monotonic clock, from the moment they *observed* the Lease change, never by comparing wall clocks across nodes.
+- **Leader steps down first.** The leader retries renewal every `retry_period` and stops once `renew_deadline` has passed without a successful renewal. Every Lease request is bounded by that deadline, so a hung API call cannot keep a stale leader running. Because `renew_deadline < lease_duration`, it has stopped before any candidate may take over.
+- **Lease loss stops the controller immediately** (in-flight reconciles are cancelled) and `run()` returns `KubeGenericError::LeaderElectionLost`. Return that error from `main` so the process exits non-zero, the pod restarts, and it campaigns again.
+- **Graceful shutdown releases the Lease**, so a standby takes over at once instead of after the lease duration. A replica still waiting for leadership exits immediately on SIGTERM.
 
 ---
 
@@ -141,7 +151,13 @@ koprs = { path = "../koprs" }
 
 ## Usage
 
-Every operation takes an explicit scope argument — either `Namespaced("ns")` for namespace-scoped resources or `Cluster` for cluster-scoped ones. The scope is passed at the call site rather than encoded in the function name, so the routing is always visible.
+Every operation takes an explicit scope argument. The scope is passed at the call site rather than encoded in the function name, so the routing is always visible, and mismatches are **compile errors**:
+
+| Scope | Valid for | Operations |
+|-------|-----------|------------|
+| `Namespaced("ns")` | namespace-scoped types | everything |
+| `Cluster` | cluster-scoped types only | everything |
+| `AllNamespaces` | namespace-scoped types | list / watch / GC only — a name alone does not identify an object across namespaces |
 
 ### Apply and delete
 
@@ -162,16 +178,21 @@ let deleted = delete_resource::<MyClusterCR, _>(client.clone(), Cluster, "my-cr"
 ### Finalizers
 
 ```rust
-use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers};
+use koprs::finalizers::{add_finalizer_namespaced, remove_finalizer};
 use koprs::scope::Namespaced;
 
 // add_finalizer_namespaced extracts the namespace from the resource metadata —
 // no-op if the finalizer is already present, safe to call on every reconcile.
 add_finalizer_namespaced::<MyCR>(client.clone(), &cr, "my-operator/cleanup").await?;
 
-// Removing finalizers uses the generic scope form — pass Cluster for cluster-scoped resources.
-remove_finalizers::<MyCR, _>(client.clone(), Namespaced("my-ns"), "my-cr").await?;
+// Remove only *your* finalizer — finalizers of other controllers stay in place.
+remove_finalizer::<MyCR, _>(client.clone(), Namespaced("my-ns"), &cr, "my-operator/cleanup").await?;
 ```
+
+Both use JSON Patch with a `test` precondition: if another controller changed the
+finalizer list since `cr` was read, the call fails (and the reconcile retries) instead
+of overwriting that controller's finalizer. `remove_finalizers` (which strips *all*
+finalizers) is deprecated.
 
 ### Status
 
@@ -231,12 +252,12 @@ Use `is_being_deleted` at the top of the reconcile loop to branch into the clean
 
 ```rust
 use koprs::is_being_deleted;
-use koprs::finalizers::remove_finalizers;
+use koprs::finalizers::remove_finalizer;
 use koprs::scope::Namespaced;
 
 if is_being_deleted(&*cr) {
-    // clean up owned resources, then remove finalizer
-    remove_finalizers::<MyCR, _>(client.clone(), Namespaced(&namespace), &name).await?;
+    // clean up owned resources, then remove our finalizer
+    remove_finalizer::<MyCR, _>(client.clone(), Namespaced(&namespace), &*cr, FINALIZER).await?;
     return Ok(Action::await_change());
 }
 ```
@@ -245,13 +266,19 @@ if is_being_deleted(&*cr) {
 
 Accepts a keep-predicate: any resource matching the label selector for which the predicate returns `false` is deleted.
 
+- Lists **and** deletes in the given scope; with `AllNamespaces` each object is deleted in its own namespace.
+- Never touches finalizers: terminating objects are skipped so their owners can finish cleanup.
+- Deletes are UID-guarded, so an object re-created under the same name is left alone.
+- An empty selector is rejected. Make the selector specific to **one owner** — a selector shared by several CRs makes each CR's GC delete the others' resources.
+
 ```rust
 use koprs::gc::gc_resources;
 use koprs::scope::{Cluster, Namespaced};
 
-// Namespaced
+// Namespaced — selector scoped to one owning CR
 gc_resources::<ConfigMap, _>(
-    client.clone(), Namespaced("my-ns"), "app=my-operator",
+    client.clone(), Namespaced("my-ns"),
+    "app=my-operator,my-operator/owner=my-cr,my-operator/owner-namespace=ops",
     |r| desired_names.contains(&r.name_any()),
 ).await?;
 
@@ -329,7 +356,7 @@ while let Some(event) = rx.recv().await {
 
 ```rust
 use koprs::resources::{list_resources_scoped, list_resource_names, wait_for_resources};
-use koprs::scope::{Cluster, Namespaced};
+use koprs::scope::{AllNamespaces, Namespaced};
 use kube::api::ListParams;
 use std::time::Duration;
 
@@ -340,10 +367,10 @@ let items = list_resources_scoped::<MyCR, _>(
     ListParams::default().labels("app=my-operator"),
 ).await?;
 
-// List across all namespaces (or cluster-scoped resources) with a field filter
+// List across all namespaces with a field filter (use `Cluster` for cluster-scoped types)
 let items = list_resources_scoped::<MyCR, _>(
     client.clone(),
-    Cluster,
+    AllNamespaces,
     ListParams::default().fields("status.phase=Running"),
 ).await?;
 
@@ -363,6 +390,8 @@ let items = wait_for_resources::<MyCR, _>(
 Use `.watch()` on `ControllerBuilder` to re-queue a CR whenever a secondary resource changes. Multiple calls compose — all watches are active simultaneously.
 
 `owner_label_mapper` covers the most common pattern: the trigger resource carries a label whose *value* is the name of the CR to re-queue, and its namespace is where the CR lives.
+
+When children live in a **different** namespace than their CR (for example a CR that writes into `spec.targetNamespace`), use `owner_labels_mapper(name_label, namespace_label)` and label each child with the owner's namespace too — otherwise the CR is looked up in the child's namespace and drift is never detected.
 
 ```rust
 use koprs::controller::{ControllerBuilder, watcher};
@@ -536,7 +565,7 @@ async fn my_test() {
     // Call the function under test using the mock client.
     let result = koprs::resources::list_resources_scoped::<k8s_openapi::api::core::v1::ConfigMap, _>(
         client,
-        koprs::scope::Cluster,
+        koprs::scope::AllNamespaces,
         Default::default(),
     )
     .await
@@ -546,7 +575,7 @@ async fn my_test() {
 }
 ```
 The mock handle serves requests in FIFO order. Functions that make multiple
-API calls (such as the GC loop: list → delete → patch) require one
+API calls (such as the GC loop: list → delete per orphan) require one
 `handle.next_request()` call per request in the correct sequence.
 
 ---
