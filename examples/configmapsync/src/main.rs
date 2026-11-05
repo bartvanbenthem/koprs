@@ -24,7 +24,7 @@ use kube::{Api, Client};
 use tracing::info;
 
 use koprs::controller::{Context, ControllerBuilder, watcher};
-use koprs::owners::owner_label_mapper;
+use koprs::owners::owner_labels_mapper;
 
 use crate::reconciler::ConfigMapSyncReconciler;
 use crate::types::ConfigMapSync;
@@ -65,7 +65,12 @@ async fn main() -> anyhow::Result<()> {
         .watch(
             cm_api,
             watcher::Config::default().labels(labels),
-            owner_label_mapper("configmapsync.example.io/owner"),
+            // The ConfigMap lives in `spec.targetNamespace`, so the owner's
+            // namespace comes from a label rather than the ConfigMap's own.
+            owner_labels_mapper(
+                "configmapsync.example.io/owner",
+                "configmapsync.example.io/owner-namespace",
+            ),
         )
         .health_port(8080)
         .metrics_port(9090)

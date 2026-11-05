@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use crate::error::Result;
+use crate::error::{ExternalError, Result};
 
 // ---------------------------------------------------------------------------
 // ExternalEvent
@@ -102,6 +102,10 @@ pub struct WatchConfig {
     pub interval: Duration,
     /// Maximum wait during backoff (default: `interval × 32`).
     pub max_backoff: Duration,
+    /// Upper bound on a single [`ExternalSource::poll`] call (default: none).
+    /// A poll that exceeds it counts as a failed poll and is retried with
+    /// backoff, so a hung source cannot stall the watcher.
+    pub poll_timeout: Option<Duration>,
 }
 
 impl WatchConfig {
@@ -113,7 +117,14 @@ impl WatchConfig {
         Self {
             max_backoff: interval.saturating_mul(32),
             interval,
+            poll_timeout: None,
         }
+    }
+
+    /// Fail any single poll that takes longer than `timeout`.
+    pub fn with_poll_timeout(mut self, timeout: Duration) -> Self {
+        self.poll_timeout = Some(timeout);
+        self
     }
 
     /// Set an explicit upper bound for backoff waits.
@@ -184,7 +195,17 @@ where
         info!(source = %name, "External watcher started");
 
         loop {
-            match source.poll().await {
+            let polled = match config.poll_timeout {
+                Some(t) => tokio::time::timeout(t, source.poll())
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(ExternalError::Internal(format!(
+                            "poll timed out after {t:?}"
+                        )))
+                    }),
+                None => source.poll().await,
+            };
+            match polled {
                 Ok(events) => {
                     consecutive_errors = 0;
                     for event in events {

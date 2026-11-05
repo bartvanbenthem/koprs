@@ -2,15 +2,16 @@
 
 #[cfg(test)]
 mod gc_tests {
-    use http::{Request, Response, StatusCode};
+    use http::{Method, Request, Response, StatusCode};
     use k8s_openapi::api::core::v1::{ConfigMap, Node};
-    use kube::Client;
     use kube::client::Body;
+    use kube::{Client, ResourceExt};
     use serde_json::json;
     use tower_test::mock;
 
+    use crate::error::KubeGenericError;
     use crate::gc::gc_resources;
-    use crate::scope::{Cluster, Namespaced};
+    use crate::scope::{AllNamespaces, Cluster, Namespaced};
 
     // -----------------------------------------------------------------------
     // Harness
@@ -24,49 +25,31 @@ mod gc_tests {
     }
 
     fn json_response(body: serde_json::Value) -> Response<Body> {
-        let bytes = serde_json::to_vec(&body).unwrap();
         Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
-            .body(Body::from(bytes))
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap()
     }
 
-    fn not_found_response() -> Response<Body> {
+    fn status_response(code: u16, reason: &str) -> Response<Body> {
         let body = json!({
-            "apiVersion": "v1",
-            "kind": "Status",
-            "status": "Failure",
-            "reason": "NotFound",
-            "code": 404
+            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+            "reason": reason, "code": code
         });
         Response::builder()
-            .status(StatusCode::NOT_FOUND)
+            .status(StatusCode::from_u16(code).unwrap())
             .header("Content-Type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap()
     }
 
-    fn server_error_response() -> Response<Body> {
-        let body = json!({
-            "apiVersion": "v1",
-            "kind": "Status",
-            "status": "Failure",
-            "reason": "InternalError",
-            "code": 500
-        });
-        Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
-            .unwrap()
+    fn deleted_status() -> Response<Body> {
+        json_response(
+            json!({ "apiVersion": "v1", "kind": "Status", "status": "Success", "code": 200 }),
+        )
     }
 
-    // -----------------------------------------------------------------------
-    // Fixture builders
-    // -----------------------------------------------------------------------
-
-    /// A ConfigMap without a deletionTimestamp — a normal live resource.
     fn configmap_json(name: &str, namespace: &str) -> serde_json::Value {
         json!({
             "apiVersion": "v1",
@@ -74,66 +57,35 @@ mod gc_tests {
             "metadata": {
                 "name": name,
                 "namespace": namespace,
+                "uid": format!("uid-{namespace}-{name}"),
                 "resourceVersion": "1"
             }
         })
     }
 
-    /// A ConfigMap whose deletionTimestamp is set — it is already terminating.
     fn terminating_configmap_json(name: &str, namespace: &str) -> serde_json::Value {
-        json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {
-                "name": name,
-                "namespace": namespace,
-                "resourceVersion": "1",
-                "deletionTimestamp": "2024-01-01T00:00:00Z",
-                "finalizers": ["some-op/cleanup"]
-            }
-        })
+        let mut cm = configmap_json(name, namespace);
+        cm["metadata"]["deletionTimestamp"] = json!("2024-01-01T00:00:00Z");
+        cm["metadata"]["finalizers"] = json!(["some-op/cleanup"]);
+        cm
     }
 
-    /// A Node (cluster-scoped) without a deletionTimestamp.
     fn node_json(name: &str) -> serde_json::Value {
         json!({
             "apiVersion": "v1",
             "kind": "Node",
-            "metadata": {
-                "name": name,
-                "resourceVersion": "1"
-            }
+            "metadata": { "name": name, "uid": format!("uid-{name}"), "resourceVersion": "1" }
         })
     }
 
-    /// A ConfigMapList containing the given items.
-    fn configmap_list(items: Vec<serde_json::Value>) -> serde_json::Value {
+    fn list(kind: &str, items: Vec<serde_json::Value>) -> serde_json::Value {
         json!({
             "apiVersion": "v1",
-            "kind": "ConfigMapList",
+            "kind": kind,
             "metadata": { "resourceVersion": "1" },
             "items": items
         })
     }
-
-    /// A NodeList containing the given items.
-    fn node_list(items: Vec<serde_json::Value>) -> serde_json::Value {
-        json!({
-            "apiVersion": "v1",
-            "kind": "NodeList",
-            "metadata": { "resourceVersion": "1" },
-            "items": items
-        })
-    }
-
-    /// An empty ConfigMapList.
-    fn empty_configmap_list() -> serde_json::Value {
-        configmap_list(vec![])
-    }
-
-    // -----------------------------------------------------------------------
-    // Read the outgoing request body as JSON.
-    // -----------------------------------------------------------------------
 
     async fn read_body_json(req: Request<Body>) -> serde_json::Value {
         use http_body_util::BodyExt as _;
@@ -141,395 +93,294 @@ mod gc_tests {
         serde_json::from_slice(&bytes).unwrap()
     }
 
+    async fn assert_no_more_requests(handle: &mut MockHandle) {
+        let next =
+            tokio::time::timeout(std::time::Duration::from_millis(50), handle.next_request()).await;
+        // Timed out (nothing sent) or the client is gone (`None`) — either way no request.
+        assert!(matches!(next, Err(_) | Ok(None)), "unexpected API request");
+    }
+
     // -----------------------------------------------------------------------
-    // gc_resources — nothing to do (empty list)
+    // Guard rails
     // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn gc_rejects_empty_label_selector() {
+        let (client, mut handle) = mock_client();
+        let err = gc_resources::<ConfigMap, _>(client, Namespaced("ns"), "  ", |_| false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, KubeGenericError::Config(_)), "got {err:?}");
+        assert_no_more_requests(&mut handle).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Listing respects the scope
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn gc_namespaced_lists_only_within_that_namespace() {
+        let (client, mut handle) = mock_client();
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let uri = req.uri().to_string();
+            assert!(uri.contains("/namespaces/ns1/configmaps"), "uri={uri}");
+            assert!(uri.contains("labelSelector=app%3Dop"), "uri={uri}");
+            send.send_response(json_response(list("ConfigMapList", vec![])));
+        });
+        gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| false)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn gc_does_nothing_when_list_is_empty() {
         let (client, mut handle) = mock_client();
-
-        // Only one request is expected: the initial list.
         let server = tokio::spawn(async move {
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::GET);
-            send.send_response(json_response(empty_configmap_list()));
-            // No further requests should arrive — the handle is dropped here.
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(list("ConfigMapList", vec![])));
+            assert_no_more_requests(&mut handle).await;
         });
-
-        gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| true)
+        gc_resources::<ConfigMap, _>(client, Namespaced("ns"), "app=op", |_| false)
             .await
             .unwrap();
-
         server.await.unwrap();
     }
 
     // -----------------------------------------------------------------------
-    // gc_resources — all resources are desired (no deletions)
+    // Deletion
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn gc_skips_resources_that_are_desired() {
         let (client, mut handle) = mock_client();
-
         let server = tokio::spawn(async move {
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::GET);
-            send.send_response(json_response(configmap_list(vec![configmap_json(
-                "cm-keep", "ns1",
-            )])));
-            // No DELETE or PATCH should follow — only one request total.
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(list(
+                "ConfigMapList",
+                vec![configmap_json("keep", "ns1")],
+            )));
+            assert_no_more_requests(&mut handle).await;
         });
-
-        // Predicate always returns true → everything is desired.
         gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| true)
             .await
             .unwrap();
-
         server.await.unwrap();
     }
 
-    // -----------------------------------------------------------------------
-    // gc_resources — orphaned resource is deleted
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
-    async fn gc_deletes_orphaned_resource_not_in_desired_set() {
+    async fn gc_deletes_orphan_with_uid_precondition_and_background_propagation() {
         let (client, mut handle) = mock_client();
-
         let server = tokio::spawn(async move {
-            // 1. List call — returns one orphaned resource.
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::GET);
-            let uri = req.uri().to_string();
-            assert!(
-                uri.contains("labelSelector"),
-                "expected label selector in list call, uri={uri}"
-            );
-            send.send_response(json_response(configmap_list(vec![configmap_json(
-                "orphan", "ns1",
-            )])));
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(list(
+                "ConfigMapList",
+                vec![configmap_json("orphan", "ns1")],
+            )));
 
-            // 2. DELETE call for the orphaned resource.
             let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::DELETE);
+            assert_eq!(req.method(), Method::DELETE);
             assert!(
                 req.uri()
-                    .to_string()
-                    .contains("/namespaces/ns1/configmaps/orphan"),
+                    .path()
+                    .ends_with("/namespaces/ns1/configmaps/orphan"),
                 "uri={}",
                 req.uri()
             );
-            // Kubernetes returns the deleted object (or a Status) — we return the object.
-            send.send_response(json_response(configmap_json("orphan", "ns1")));
-
-            // 3. After deletion kube calls clear_finalizers (PATCH finalizers=null).
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::PATCH);
             let body = read_body_json(req).await;
-            assert_eq!(
-                body["metadata"]["finalizers"],
-                serde_json::Value::Null,
-                "clear_finalizers must set finalizers to null"
-            );
-            send.send_response(json_response(configmap_json("orphan", "ns1")));
+            assert_eq!(body["propagationPolicy"], "Background");
+            assert_eq!(body["preconditions"]["uid"], "uid-ns1-orphan");
+            send.send_response(deleted_status());
+
+            // No follow-up finalizer patch.
+            assert_no_more_requests(&mut handle).await;
         });
-
-        // Predicate never matches "orphan" → it should be deleted.
-        gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |r| {
-            r.metadata.name.as_deref() != Some("orphan")
-        })
-        .await
-        .unwrap();
-
+        gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| false)
+            .await
+            .unwrap();
         server.await.unwrap();
     }
 
-    // -----------------------------------------------------------------------
-    // gc_resources — multiple resources, mixed desired / orphaned
-    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn gc_all_namespaces_deletes_each_object_in_its_own_namespace() {
+        // Two orphans with the same name in different namespaces: each delete
+        // must target the namespace the object was found in.
+        let (client, mut handle) = mock_client();
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            assert!(
+                !req.uri().path().contains("/namespaces/"),
+                "uri={}",
+                req.uri()
+            );
+            send.send_response(json_response(list(
+                "ConfigMapList",
+                vec![
+                    configmap_json("dup", "team-a"),
+                    configmap_json("dup", "team-b"),
+                ],
+            )));
+            for ns in ["team-a", "team-b"] {
+                let (req, send) = handle.next_request().await.unwrap();
+                assert_eq!(req.method(), Method::DELETE);
+                assert!(
+                    req.uri()
+                        .path()
+                        .ends_with(&format!("/namespaces/{ns}/configmaps/dup")),
+                    "uri={}",
+                    req.uri()
+                );
+                send.send_response(deleted_status());
+            }
+        });
+        gc_resources::<ConfigMap, _>(client, AllNamespaces, "app=op", |_| false)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn gc_only_deletes_orphaned_resources_from_mixed_list() {
         let (client, mut handle) = mock_client();
-
         let server = tokio::spawn(async move {
-            // 1. List returns two resources: one desired, one orphaned.
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_list(vec![
-                configmap_json("keep", "ns1"),
-                configmap_json("orphan", "ns1"),
-            ])));
-
-            // 2. DELETE for "orphan" only (no call for "keep").
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(list(
+                "ConfigMapList",
+                vec![
+                    configmap_json("keep", "ns1"),
+                    configmap_json("orphan", "ns1"),
+                ],
+            )));
             let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::DELETE);
             assert!(
-                req.uri().to_string().contains("orphan"),
+                req.uri().path().ends_with("/configmaps/orphan"),
                 "uri={}",
                 req.uri()
             );
-            send.send_response(json_response(configmap_json("orphan", "ns1")));
-
-            // 3. clear_finalizers PATCH after delete.
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_json("orphan", "ns1")));
+            send.send_response(deleted_status());
+            assert_no_more_requests(&mut handle).await;
         });
-
-        gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |r| {
-            r.metadata.name.as_deref() == Some("keep")
+        gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |cm| {
+            cm.name_any() == "keep"
         })
         .await
         .unwrap();
-
         server.await.unwrap();
     }
 
-    // -----------------------------------------------------------------------
-    // gc_resources — terminating resource gets finalizers cleared, not deleted
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
-    async fn gc_clears_finalizers_on_terminating_resource_instead_of_deleting() {
+    async fn gc_leaves_terminating_resources_and_their_finalizers_alone() {
         let (client, mut handle) = mock_client();
-
         let server = tokio::spawn(async move {
-            // 1. List returns a resource that is already terminating.
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_list(vec![
-                terminating_configmap_json("terminating", "ns1"),
-            ])));
-
-            // 2. Should go straight to a PATCH (clear_finalizers), skipping DELETE.
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(
-                req.method(),
-                http::Method::PATCH,
-                "expected PATCH to clear finalizers, not DELETE"
-            );
-            let uri = req.uri().to_string();
-            assert!(uri.contains("terminating"), "uri={uri}");
-            let body = read_body_json(req).await;
-            assert_eq!(body["metadata"]["finalizers"], serde_json::Value::Null);
-            send.send_response(json_response(terminating_configmap_json(
-                "terminating",
-                "ns1",
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(list(
+                "ConfigMapList",
+                vec![terminating_configmap_json("dying", "ns1")],
             )));
+            // No DELETE and, crucially, no finalizer-clearing PATCH.
+            assert_no_more_requests(&mut handle).await;
         });
-
-        // Resource is not desired (would normally trigger deletion), but because
-        // it has a deletionTimestamp the GC loop should only clear finalizers.
         gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| false)
             .await
             .unwrap();
-
         server.await.unwrap();
     }
-
-    // -----------------------------------------------------------------------
-    // gc_resources — delete returns 404 (already gone), should not error
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn gc_tolerates_404_on_delete_as_already_deleted() {
         let (client, mut handle) = mock_client();
-
         let server = tokio::spawn(async move {
-            // 1. List
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_list(vec![configmap_json(
-                "gone", "ns1",
-            )])));
-
-            // 2. DELETE → 404 (someone else already deleted it).
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::DELETE);
-            send.send_response(not_found_response());
-
-            // No PATCH should follow — the 404 path skips clear_finalizers.
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(list(
+                "ConfigMapList",
+                vec![configmap_json("gone", "ns1")],
+            )));
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(status_response(404, "NotFound"));
         });
-
         gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| false)
             .await
-            .unwrap(); // must not return Err
-
+            .unwrap();
         server.await.unwrap();
     }
 
-    // -----------------------------------------------------------------------
-    // gc_resources — non-404 delete error is propagated
-    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn gc_tolerates_409_when_object_was_replaced_since_listing() {
+        let (client, mut handle) = mock_client();
+        let server = tokio::spawn(async move {
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(list(
+                "ConfigMapList",
+                vec![configmap_json("recreated", "ns1")],
+            )));
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(status_response(409, "Conflict"));
+        });
+        gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| false)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn gc_propagates_non_404_delete_errors() {
         let (client, mut handle) = mock_client();
-
         let server = tokio::spawn(async move {
-            // 1. List
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_list(vec![configmap_json(
-                "cm1", "ns1",
-            )])));
-
-            // 2. DELETE → 500
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(server_error_response());
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(list(
+                "ConfigMapList",
+                vec![configmap_json("orphan", "ns1")],
+            )));
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(status_response(500, "InternalError"));
         });
-
         let result =
             gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| false).await;
-        assert!(result.is_err(), "expected Err on 500 delete, got Ok");
-
+        assert!(result.is_err());
         server.await.unwrap();
     }
-
-    // -----------------------------------------------------------------------
-    // gc_resources — list error is propagated
-    // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn gc_propagates_list_errors() {
         let (client, mut handle) = mock_client();
-
         let server = tokio::spawn(async move {
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(server_error_response());
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(status_response(500, "InternalError"));
         });
-
         let result =
             gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| false).await;
-        assert!(result.is_err(), "expected Err on 500 list, got Ok");
-
+        assert!(result.is_err());
         server.await.unwrap();
     }
 
     // -----------------------------------------------------------------------
-    // gc_cluster_resources — convenience wrapper
+    // Cluster-scoped resources
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn gc_cluster_resources_lists_and_deletes_without_namespace_segment() {
         let (client, mut handle) = mock_client();
-
         let server = tokio::spawn(async move {
-            // 1. List — cluster-scoped, no /namespaces/ in URI.
             let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::GET);
-            let uri = req.uri().to_string();
             assert!(
-                !uri.contains("namespaces"),
-                "unexpected namespace in list uri={uri}"
-            );
-            send.send_response(json_response(node_list(vec![node_json("orphan-node")])));
-
-            // 2. DELETE
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::DELETE);
-            let uri = req.uri().to_string();
-            assert!(uri.contains("/api/v1/nodes/orphan-node"), "uri={uri}");
-            assert!(!uri.contains("namespaces"), "uri={uri}");
-            send.send_response(json_response(node_json("orphan-node")));
-
-            // 3. clear_finalizers PATCH
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(node_json("orphan-node")));
-        });
-
-        gc_resources::<Node, _>(client, Cluster, "app=op", |_| false)
-            .await
-            .unwrap();
-
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn gc_cluster_resources_skips_desired_nodes() {
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(node_list(vec![node_json("keep-node")])));
-            // No further requests — the single desired node is skipped.
-        });
-
-        gc_resources::<Node, _>(client, Cluster, "app=op", |_| true)
-            .await
-            .unwrap();
-
-        server.await.unwrap();
-    }
-
-    // -----------------------------------------------------------------------
-    // gc_namespaced_resources — convenience wrapper
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn gc_namespaced_resources_lists_and_deletes_within_namespace() {
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            // 1. List (gc_resources uses Api::all internally, then per-resource
-            //    Api::namespaced — so the list URI uses the all-namespaces path).
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::GET);
-            send.send_response(json_response(configmap_list(vec![configmap_json(
-                "orphan", "prod",
-            )])));
-
-            // 2. DELETE via namespaced API.
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::DELETE);
-            assert!(
-                req.uri().to_string().contains("configmaps/orphan"),
+                !req.uri().to_string().contains("namespaces"),
                 "uri={}",
                 req.uri()
             );
-            send.send_response(json_response(configmap_json("orphan", "prod")));
-
-            // 3. clear_finalizers PATCH.
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_json("orphan", "prod")));
+            send.send_response(json_response(list("NodeList", vec![node_json("old")])));
+            let (req, send) = handle.next_request().await.unwrap();
+            assert_eq!(req.method(), Method::DELETE);
+            assert!(
+                req.uri().path().ends_with("/api/v1/nodes/old"),
+                "uri={}",
+                req.uri()
+            );
+            send.send_response(deleted_status());
         });
-
-        gc_resources::<ConfigMap, _>(client, Namespaced("prod"), "app=op", |_| false)
+        gc_resources::<Node, _>(client, Cluster, "app=op", |_| false)
             .await
             .unwrap();
-
-        server.await.unwrap();
-    }
-
-    // -----------------------------------------------------------------------
-    // clear_finalizers errors are silently swallowed
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn gc_continues_when_clear_finalizers_patch_fails() {
-        // After a successful delete, the clear_finalizers PATCH may fail (e.g.
-        // the resource is already fully gone). The GC loop must swallow that
-        // error and return Ok.
-        let (client, mut handle) = mock_client();
-
-        let server = tokio::spawn(async move {
-            // 1. List
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_list(vec![configmap_json(
-                "orphan", "ns1",
-            )])));
-
-            // 2. DELETE succeeds.
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(configmap_json("orphan", "ns1")));
-
-            // 3. PATCH (clear_finalizers) → 404, resource already gone.
-            let (_req, send) = handle.next_request().await.unwrap();
-            send.send_response(not_found_response());
-        });
-
-        // Must not return Err even though the finalizer clear failed.
-        gc_resources::<ConfigMap, _>(client, Namespaced("ns1"), "app=op", |_| false)
-            .await
-            .unwrap();
-
         server.await.unwrap();
     }
 }

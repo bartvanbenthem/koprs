@@ -20,7 +20,6 @@
 //! ## Quick start
 //!
 //! ```no_run
-//! use std::fs;
 //! use koprs_admission::{AdmissionRequest, ValidationResponse};
 //! use koprs_admission::webhook::{Validator, WebhookBuilder};
 //! use serde::Deserialize;
@@ -46,12 +45,10 @@
 //! }
 //!
 //! # async fn example() -> Result<(), koprs_admission::AdmissionError> {
-//! let cert_pem = fs::read("/tls/tls.crt")?;
-//! let key_pem  = fs::read("/tls/tls.key")?;
-//!
 //! WebhookBuilder::new()
 //!     .port(8443)
-//!     .tls_from_pem(&cert_pem, &key_pem)?
+//!     // Reloaded automatically when cert-manager rotates the Secret.
+//!     .tls_from_files("/tls/tls.crt", "/tls/tls.key")?
 //!     .health_port(8080)
 //!     .graceful_shutdown()
 //!     .validate("/validate/myresource", ReplicaLimit)
@@ -63,10 +60,14 @@
 
 pub mod error;
 pub mod review;
+pub mod tls;
 pub mod webhook;
 
 pub use error::AdmissionError;
-pub use review::{AdmissionRequest, Operation, ValidationResponse};
+pub use review::{
+    AdmissionRequest, GroupVersionKind, GroupVersionResource, Operation, UserInfo,
+    ValidationResponse,
+};
 pub use webhook::{Validator, WebhookBuilder};
 
 #[cfg(test)]

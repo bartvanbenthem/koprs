@@ -2,4 +2,5 @@
 //! Tests for koprs-admission.
 mod error;
 mod review;
+mod tls;
 mod webhook;

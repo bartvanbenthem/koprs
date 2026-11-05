@@ -51,7 +51,7 @@ use crate::error::{KubeGenericError, Result};
 /// | Metric | Type | Labels | Meaning |
 /// |--------|------|--------|---------|
 /// | `{namespace_}reconciliations_total` | counter | — | Reconciles completed, success or failure |
-/// | `{namespace_}reconcile_errors_total` | counter | `kind`, `error` | Failed reconciles, by resource kind and error |
+/// | `{namespace_}reconcile_errors_total` | counter | `kind`, `error` | Failed reconciles, by resource kind and error category ([`Reconciler::error_label`](crate::controller::Reconciler::error_label)) |
 /// | `{namespace_}reconcile_duration_seconds` | histogram | `kind` | Reconcile latency, by resource kind |
 ///
 /// The `namespace` prefix (e.g. `"myoperator"`) is set in [`Metrics::new`] and
@@ -142,8 +142,13 @@ impl Metrics {
             .observe(duration.as_secs_f64());
     }
 
-    /// Record a failed reconcile of `kind` that took `duration`, labelled
-    /// with the error's `Display` representation.
+    /// Record a failed reconcile of `kind` that took `duration`.
+    ///
+    /// `error` becomes the `error` label value and **must come from a small,
+    /// fixed set** (an error category such as
+    /// [`KubeGenericError::metric_label`], or `"timeout"`). Never pass an
+    /// error's `Display` output: it embeds object names and resource versions,
+    /// so every distinct message would create a new time series.
     pub fn record_failure(&self, kind: &str, error: &str, duration: Duration) {
         self.reconciliations.inc();
         self.errors.with_label_values(&[kind, error]).inc();

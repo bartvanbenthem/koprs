@@ -1,10 +1,11 @@
 [package]
 name = "koprs-external"
-version = "0.10.1"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.88"
 description = "Generic polling watchers for external sources such as HTTP APIs and object stores, designed as a companion to koprs Kubernetes operators."
-license = "MIT"
-repository = "https://github.com/bartvanbenthem/koprs"
+license.workspace = true
+repository.workspace = true
 readme = "README.md"
 keywords = ["kubernetes", "operator", "watcher", "http", "polling"]
 categories = ["web-programming", "asynchronous"]
@@ -14,12 +15,12 @@ name = "koprs_external"
 path = "src/lib.rs"
 
 [dependencies]
-thiserror = "1"
-futures = "0.3"
-bytes = "1"
+thiserror.workspace = true
+futures.workspace = true
+bytes.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
-tracing = "0.1"
+tracing.workspace = true
 
 [dependencies.object_store]
 version = "0.11"
@@ -28,8 +29,8 @@ optional = true
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
-kube = { version = "4.2.0", default-features = true, features = ["derive", "runtime"] }
-k8s-openapi = { version = "0.28.0", default-features = false, features = ["v1_36"] }
+kube.workspace = true
+k8s-openapi.workspace = true
 
 [features]
 default = []

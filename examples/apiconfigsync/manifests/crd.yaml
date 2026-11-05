@@ -1,0 +1,144 @@
+# manifests/crd.yaml
+#
+# CustomResourceDefinition for ApiConfigSync.
+# Generated from `src/types.rs` (`ApiConfigSync::crd()`); the `crd_manifest_is_up_to_date`
+# test fails if this file drifts from the Rust type.
+# Apply with: kubectl apply -f manifests/crd.yaml
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: apiconfigsyncs.example.io
+spec:
+  group: example.io
+  names:
+    kind: ApiConfigSync
+    plural: apiconfigsyncs
+    singular: apiconfigsync
+  scope: Namespaced
+  versions:
+    - additionalPrinterColumns:
+        - jsonPath: .spec.targetNamespace
+          name: Target
+          type: string
+        - jsonPath: .spec.apiUrl
+          name: ApiUrl
+          type: string
+        - jsonPath: .status.ready
+          name: Ready
+          type: string
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: Auto-generated derived type for ApiConfigSyncSpec via `CustomResource`
+          properties:
+            spec:
+              description: Spec section of the ApiConfigSync CRD.
+              properties:
+                apiUrl:
+                  description: |-
+                    HTTPS endpoint to poll once per reconcile for configuration data.
+                    Must satisfy the operator's outbound URL policy (see `url_policy.rs`).
+                  type: string
+                bearerTokenSecretRef:
+                  description: |-
+                    Optional reference to a Secret **in the CR's namespace** holding the
+                    Bearer token sent as `Authorization: Bearer <token>`.
+
+                    Tokens are never stored in the CR itself: CR specs are readable by
+                    anyone with `get` on the resource and end up in etcd, audit logs, and
+                    `kubectl get -o yaml` output.
+                  nullable: true
+                  properties:
+                    key:
+                      default: token
+                      description: 'Key within the Secret''s `data` (default: "token").'
+                      type: string
+                    name:
+                      description: Name of the Secret.
+                      type: string
+                  required:
+                    - name
+                  type: object
+                configKey:
+                  default: config
+                  description: 'Key name used in the resulting ConfigMap (default: "config").'
+                  type: string
+                targetNamespace:
+                  description: Namespace where the synced ConfigMap should be created/maintained.
+                  type: string
+              required:
+                - apiUrl
+                - targetNamespace
+              type: object
+            status:
+              description: Status section written back by the operator after each reconcile.
+              nullable: true
+              properties:
+                conditions:
+                  description: Standard Kubernetes conditions array.
+                  items:
+                    description: |-
+                      A [`JsonSchema`]-compatible condition for use in CRD status fields.
+
+                      Mirrors the shape of `k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition`
+                      but derives [`JsonSchema`] so it can appear directly in `CustomResource`-derived
+                      status types without defining a local mirror type.
+
+                      `last_transition_time` is stored as an RFC 3339 string, which is what
+                      Kubernetes tooling expects and what `make_condition` / `From<Condition>`
+                      produce automatically.
+
+                      # Examples
+
+                      ```
+                      use koprs::status::{KoprsCondition, make_condition};
+
+                      let c: KoprsCondition = make_condition("Ready", "True", "Synced", "All good", None);
+                      assert_eq!(c.type_, "Ready");
+                      assert_eq!(c.status, "True");
+                      ```
+                    properties:
+                      lastTransitionTime:
+                        description: RFC 3339 timestamp of the last status transition.
+                        type: string
+                      message:
+                        description: Human-readable description of the condition.
+                        type: string
+                      observedGeneration:
+                        description: Generation of the CR observed when this condition was set.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      reason:
+                        description: Machine-readable reason token, e.g. `"ConfigMapSynced"`.
+                        type: string
+                      status:
+                        description: '`"True"`, `"False"`, or `"Unknown"`.'
+                        type: string
+                      type:
+                        description: The condition type, e.g. `"Ready"`.
+                        type: string
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    type: object
+                  type: array
+                message:
+                  default: ''
+                  type: string
+                ready:
+                  default: false
+                  type: boolean
+              type: object
+          required:
+            - spec
+          title: ApiConfigSync
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

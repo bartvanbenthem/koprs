@@ -21,3 +21,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+url = "2"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+serde-saphyr = "0.0.29"

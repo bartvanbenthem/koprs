@@ -16,7 +16,7 @@ use tracing::{error, info};
 use koprs::controller::{Action, Context, Reconciler};
 use koprs::error::KubeGenericError;
 use koprs::events::{EventType, record_event};
-use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers};
+use koprs::finalizers::{add_finalizer_namespaced, remove_finalizer};
 use koprs::gc::gc_resources;
 use koprs::is_being_deleted;
 use koprs::meta::ObjectMetaBuilder;
@@ -55,7 +55,7 @@ impl Reconciler<SecretSync> for SecretSyncReconciler {
             info!(cr = %name, "deletion timestamp set — running cleanup");
 
             let target_ns = &cr.spec.target_namespace;
-            let secret_name = secret_name(&name);
+            let secret_name = secret_name(&namespace, &name);
 
             match delete_resource::<Secret, _>(client.clone(), Namespaced(target_ns), &secret_name)
                 .await
@@ -64,12 +64,18 @@ impl Reconciler<SecretSync> for SecretSyncReconciler {
                 Ok(false) => info!(secret = %secret_name, "Secret was already gone"),
                 Err(e) => {
                     error!(error = %e, "failed to delete Secret during cleanup");
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
 
-            remove_finalizers::<SecretSync, _>(client.clone(), Namespaced(&namespace), &name)
-                .await?;
+            // Remove only our finalizer; others (if any) stay in place.
+            remove_finalizer::<SecretSync, _>(
+                client.clone(),
+                Namespaced(&namespace),
+                &*cr,
+                FINALIZER,
+            )
+            .await?;
             info!(cr = %name, "finalizer removed — deletion complete");
             return Ok(Action::await_change());
         }
@@ -83,8 +89,14 @@ impl Reconciler<SecretSync> for SecretSyncReconciler {
 
         // 2. Build and ensure the desired Secret.
         let target_ns = &cr.spec.target_namespace;
-        let secret_name = secret_name(&name);
-        let desired_secret = build_secret(&secret_name, target_ns, &name, &cr.spec.string_data);
+        let secret_name = secret_name(&namespace, &name);
+        let desired_secret = build_secret(
+            &secret_name,
+            target_ns,
+            &namespace,
+            &name,
+            &cr.spec.string_data,
+        );
 
         let outcome = ensure_resource::<Secret, _>(
             client.clone(),
@@ -120,9 +132,12 @@ impl Reconciler<SecretSync> for SecretSyncReconciler {
         }
 
         // 3. Garbage-collect stale Secrets previously owned by this CR.
-        gc_resources::<Secret, _>(client.clone(), Namespaced(target_ns), MANAGED_LABEL, |s| {
-            s.name_any() == secret_name
-        })
+        gc_resources::<Secret, _>(
+            client.clone(),
+            Namespaced(target_ns),
+            &owner_selector(&namespace, &name),
+            |s| s.name_any() == secret_name,
+        )
         .await?;
 
         // 4. Stamp the target namespace as a label on the CR.
@@ -165,6 +180,10 @@ impl Reconciler<SecretSync> for SecretSyncReconciler {
         Ok(Action::requeue(Duration::from_secs(300)))
     }
 
+    fn error_label(&self, err: &KubeGenericError) -> &'static str {
+        err.metric_label()
+    }
+
     fn error_policy(
         &self,
         cr: Arc<SecretSync>,
@@ -180,13 +199,24 @@ impl Reconciler<SecretSync> for SecretSyncReconciler {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn secret_name(cr_name: &str) -> String {
-    format!("ss-{cr_name}")
+/// Child name; includes the CR namespace so equally-named CRs in different
+/// namespaces never write the same object.
+fn secret_name(cr_namespace: &str, cr_name: &str) -> String {
+    format!("ss-{cr_namespace}-{cr_name}")
+}
+
+/// Label selector matching only the children of one CR. GC with a selector
+/// shared by all CRs would make every CR delete the others' children.
+fn owner_selector(cr_namespace: &str, cr_name: &str) -> String {
+    format!(
+        "{MANAGED_LABEL},multicontroller.example.io/owner={cr_name},multicontroller.example.io/owner-namespace={cr_namespace}"
+    )
 }
 
 fn build_secret(
     name: &str,
     namespace: &str,
+    owner_ns: &str,
     owner_cr: &str,
     string_data: &BTreeMap<String, String>,
 ) -> Secret {
@@ -196,6 +226,7 @@ fn build_secret(
             .namespace(namespace)
             .label("app.kubernetes.io/managed-by", "multicontroller-secretsync")
             .label("multicontroller.example.io/owner", owner_cr)
+            .label("multicontroller.example.io/owner-namespace", owner_ns)
             .build(),
         type_: Some("Opaque".to_string()),
         string_data: Some(string_data.clone()),

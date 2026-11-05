@@ -1,0 +1,73 @@
+# manifests/webhook.yaml
+#
+# TLS certificate (cert-manager), Service and ValidatingWebhookConfiguration
+# for the apiconfigsync admission webhook.
+#
+# Requires cert-manager: https://cert-manager.io/docs/installation/
+# cert-manager issues the serving certificate into the `apiconfigsync-webhook-tls`
+# Secret (mounted by the Deployment at /tls) and injects its CA into the
+# webhook configuration via the `cert-manager.io/inject-ca-from` annotation.
+# The operator re-reads the certificate when cert-manager rotates it.
+#
+# Apply with: kubectl apply -f manifests/webhook.yaml
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: apiconfigsync-selfsigned
+  namespace: apiconfigsync-system
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: apiconfigsync-webhook
+  namespace: apiconfigsync-system
+spec:
+  secretName: apiconfigsync-webhook-tls
+  dnsNames:
+    - apiconfigsync-webhook.apiconfigsync-system.svc
+    - apiconfigsync-webhook.apiconfigsync-system.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: apiconfigsync-selfsigned
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apiconfigsync-webhook
+  namespace: apiconfigsync-system
+spec:
+  selector:
+    app.kubernetes.io/name: apiconfigsync-operator
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: apiconfigsync-webhook
+  annotations:
+    cert-manager.io/inject-ca-from: apiconfigsync-system/apiconfigsync-webhook
+webhooks:
+  - name: validate.apiconfigsync.example.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    # Reject CRs when the webhook is unavailable: the URL policy is a security
+    # control (the reconciler enforces it too, but fail closed here as well).
+    failurePolicy: Fail
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: apiconfigsync-webhook
+        namespace: apiconfigsync-system
+        path: /validate/apiconfigsync
+    rules:
+      - apiGroups: ["example.io"]
+        apiVersions: ["v1alpha1"]
+        resources: ["apiconfigsyncs"]
+        operations: ["CREATE", "UPDATE"]
+        scope: Namespaced

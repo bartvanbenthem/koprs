@@ -80,12 +80,11 @@ async fn mock_handler(State(state): State<MockState>, headers: HeaderMap) -> imp
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    if let Some(ref etag) = etag_val {
-        if let Some(inm) = headers.get("if-none-match") {
-            if inm.to_str().unwrap_or("") == etag.as_str() {
-                return StatusCode::NOT_MODIFIED.into_response();
-            }
-        }
+    if let Some(ref etag) = etag_val
+        && let Some(inm) = headers.get("if-none-match")
+        && inm.to_str().unwrap_or("") == etag.as_str()
+    {
+        return StatusCode::NOT_MODIFIED.into_response();
     }
 
     let mut resp_headers = HeaderMap::new();

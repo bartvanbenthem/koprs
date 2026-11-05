@@ -4,10 +4,10 @@ use kube_runtime::WatchStreamExt;
 use kube_runtime::watcher::{Config, watcher};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::error::Result;
-use crate::scope::ApiScope;
+use crate::scope::ListScope;
 use crate::traits::KubeResource;
 
 // ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ where
             .try_for_each(|resource: T| {
                 let tx = tx.clone();
                 async move {
-                    info!(name = %resource.name_any(), "Resource applied");
+                    debug!(name = %resource.name_any(), "Resource applied");
                     tx.send(()).await.ok();
                     Ok(())
                 }
@@ -111,7 +111,7 @@ pub async fn watch<T, Scope>(
 ) -> Result<JoinHandle<()>>
 where
     T: KubeResource,
-    Scope: ApiScope<T>,
+    Scope: ListScope<T>,
 {
     let kind = T::kind(&());
     match label_selector {
@@ -174,7 +174,7 @@ pub async fn watch_objects<T, Scope>(
 ) -> Result<JoinHandle<()>>
 where
     T: KubeResource,
-    Scope: ApiScope<T>,
+    Scope: ListScope<T>,
 {
     let kind = T::kind(&());
     match label_selector {
@@ -195,7 +195,7 @@ where
             .try_for_each(|resource: T| {
                 let tx = tx.clone();
                 async move {
-                    info!(name = %resource.name_any(), "Resource applied — sending object");
+                    debug!(name = %resource.name_any(), "Resource applied — sending object");
                     tx.send(resource).await.ok();
                     Ok(())
                 }
@@ -263,7 +263,7 @@ pub async fn watch_events<T, Scope>(
 ) -> Result<JoinHandle<()>>
 where
     T: KubeResource,
-    Scope: ApiScope<T>,
+    Scope: ListScope<T>,
 {
     let kind = T::kind(&());
     match label_selector {
@@ -285,18 +285,18 @@ where
                 async move {
                     let msg = match event {
                         kube_runtime::watcher::Event::Apply(r) => {
-                            info!(name = %r.name_any(), "Resource applied");
+                            debug!(name = %r.name_any(), "Resource applied");
                             Some(WatchEvent::Applied(r))
                         }
                         kube_runtime::watcher::Event::Delete(r) => {
-                            info!(name = %r.name_any(), "Resource deleted");
+                            debug!(name = %r.name_any(), "Resource deleted");
                             Some(WatchEvent::Deleted(r))
                         }
                         // During a watch restart, existing objects arrive as
                         // InitApply events. Treat them as Applied so callers
                         // can reconcile current state.
                         kube_runtime::watcher::Event::InitApply(r) => {
-                            info!(name = %r.name_any(), "Resource observed (init)");
+                            debug!(name = %r.name_any(), "Resource observed (init)");
                             Some(WatchEvent::Applied(r))
                         }
                         // Init and InitDone are bookmarks with no resource

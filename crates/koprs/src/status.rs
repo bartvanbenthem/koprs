@@ -5,7 +5,7 @@ use kube::{Api, Client};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::info;
+use tracing::debug;
 
 use crate::error::Result;
 
@@ -107,10 +107,10 @@ where
     K::DynamicType: Default,
     S: Serialize,
 {
-    let ctx = K::DynamicType::default();
+    K::DynamicType::default();
     let patch = json!({
-        "apiVersion": K::api_version(&ctx),
-        "kind": K::kind(&ctx),
+        "apiVersion": K::api_version(&()),
+        "kind": K::kind(&()),
         "status": status,
     });
     let params = PatchParams::apply(field_manager).force();
@@ -170,13 +170,13 @@ where
     S: Serialize,
     Scope: ApiScope<K>,
 {
-    let ctx = K::DynamicType::default();
-    let kind = K::kind(&ctx);
+    K::DynamicType::default();
+    let kind = K::kind(&());
 
     // Read the namespace out safely before consuming the scope
     match scope.namespace() {
-        Some(ns) => info!(namespace = %ns, %kind, %name, "Patching status"),
-        None => info!(%kind, %name, "Patching status"),
+        Some(ns) => debug!(namespace = %ns, %kind, %name, "Patching status"),
+        None => debug!(%kind, %name, "Patching status"),
     }
 
     apply_status_patch(scope.into_api(client), name, status, field_manager).await
@@ -199,9 +199,9 @@ where
 /// * `namespace`     – The namespace that owns the resource.
 /// * `name`          – The name of the resource to patch.
 /// * `status`        – Any serialisable value that represents the desired
-///                     `.status` subresource body.
+///   `.status` subresource body.
 /// * `field_manager` – The field-manager string used for Server-Side Apply
-///                     (typically your operator's name, e.g. `"my-operator"`).
+///   (typically your operator's name, e.g. `"my-operator"`).
 ///
 /// # Examples
 ///
@@ -254,9 +254,9 @@ where
 /// * `client`        – A cloned [`kube::Client`].
 /// * `name`          – The name of the resource to patch.
 /// * `status`        – Any serialisable value that represents the desired
-///                     `.status` subresource body.
+///   `.status` subresource body.
 /// * `field_manager` – The field-manager string used for Server-Side Apply
-///                     (typically your operator's name, e.g. `"my-operator"`).
+///   (typically your operator's name, e.g. `"my-operator"`).
 ///
 /// # Examples
 ///

@@ -34,12 +34,13 @@ Kubernetes admission webhooks intercept API server requests before they are pers
 | Area | koprs-admission | rolling your own |
 |---|---|---|
 | **HTTP server** | `WebhookBuilder` binds the port, serves HTTPS, handles routing | You configure axum, hyper, and TLS manually |
-| **TLS** | `.tls_from_pem()` loads cert-manager `Secret` volumes in one call | You wire up rustls, load PEM files, build `ServerConfig` |
-| **Request parsing** | `AdmissionRequest<T>` — typed object, operation, uid, namespace | You parse `AdmissionReview` JSON and deserialise the raw `object` field |
+| **TLS** | `.tls_from_files()` serves a mounted cert-manager `Secret` and **reloads it on rotation** — no pod restart | You wire up rustls, load PEM files, build `ServerConfig`, handle rotation |
+| **Request parsing** | `AdmissionRequest<T>` — typed object / old object, operation, uid, namespace, kind, resource, subresource, and `user_info` for identity-aware rules | You parse `AdmissionReview` JSON and deserialise the raw `object` field |
+| **Hardening** | TLS handshake and header-read timeouts, a per-request timeout (default 10s), and an 8 MiB body limit (large enough for UPDATE reviews of big objects) | You add timeouts and limits yourself |
 | **Response building** | Return `ValidationResponse::allow()` or `ValidationResponse::deny("reason")` | You construct `AdmissionReview` response JSON with correct uid echo |
 | **Validator errors** | `Err` from your validator returns HTTP 500, letting Kubernetes `failurePolicy` apply | You decide how to map errors to HTTP status codes |
 | **Health probes** | `.health_port()` serves `GET /healthz` and `GET /readyz` | You wire up a second HTTP listener |
-| **Graceful shutdown** | `.graceful_shutdown()` stops cleanly on SIGTERM / Ctrl+C | You handle signals and coordinate shutdown |
+| **Graceful shutdown** | `.graceful_shutdown()` on SIGTERM / Ctrl+C: `/readyz` turns `503`, new connections stop, in-flight requests drain | You handle signals and coordinate shutdown |
 | **Multiple webhooks** | Chain `.validate()` calls to serve several resource types from one server | You manage multiple router routes and validator instances |
 
 ---
@@ -116,17 +117,14 @@ impl Validator<MyApp> for PolicyValidator {
 ### Running the webhook server
 
 ```rust
-use std::fs;
 use koprs_admission::webhook::WebhookBuilder;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cert_pem = fs::read("/tls/tls.crt")?;
-    let key_pem  = fs::read("/tls/tls.key")?;
-
     WebhookBuilder::new()
         .port(8443)
-        .tls_from_pem(&cert_pem, &key_pem)?
+        // Re-read automatically when cert-manager rotates the Secret.
+        .tls_from_files("/tls/tls.crt", "/tls/tls.key")?
         .health_port(8080)
         .graceful_shutdown()
         .validate("/validate/myapp", PolicyValidator)
@@ -144,7 +142,7 @@ Chain `.validate()` calls to register multiple resource types on the same port. 
 ```rust
 WebhookBuilder::new()
     .port(8443)
-    .tls_from_pem(&cert_pem, &key_pem)?
+    .tls_from_files("/tls/tls.crt", "/tls/tls.key")?
     .validate("/validate/myapp", AppValidator)
     .validate("/validate/myconfig", ConfigValidator)
     .run()
@@ -167,6 +165,22 @@ Warnings appear in `kubectl apply` output even when the request is allowed.
 
 When your `validate` method returns `Err`, the webhook server responds with HTTP 500. Kubernetes then applies the `failurePolicy` configured on the `ValidatingWebhookConfiguration` (`Fail` or `Ignore`). Use this for transient errors (network calls, external lookups) that should be retried. For intentional denials, always return `Ok(ValidationResponse::deny(...))`.
 
+### Identity-aware validation
+
+`AdmissionRequest::user_info` carries the authenticated requester, so rules can depend on who is making the change:
+
+```rust
+if request.user_info.username != "system:serviceaccount:ops:my-operator"
+    && request.operation == Operation::Update
+{
+    return Ok(ValidationResponse::deny("only the operator may modify this resource"));
+}
+```
+
+### TLS — certificate rotation
+
+`.tls_from_files(cert, key)` checks the files for changes at most every 10s (`.tls_from_files_with_interval` to tune) and serves the new certificate on the next handshake. If a reload fails — for example while only one of the two files has been rewritten — the previous certificate keeps being served. `.tls_from_pem(cert, key)` loads a fixed certificate from memory.
+
 ### TLS — bringing your own `rustls::ServerConfig`
 
 Use `.tls()` when you need full control over the TLS configuration, for example to enable client certificate authentication:
@@ -185,7 +199,7 @@ WebhookBuilder::new()
 
 ### Plain HTTP (TLS at the proxy)
 
-Omit `.tls()` and `.tls_from_pem()` to run on plain HTTP. This is useful when TLS is terminated by a sidecar (Envoy, Istio) or a load balancer in front of the pod. Note that Kubernetes requires HTTPS for webhooks called by the API server directly — plain HTTP is only suitable when a TLS-terminating proxy sits between the API server and your pod.
+Omit `.tls()`, `.tls_from_files()` and `.tls_from_pem()` to run on plain HTTP. This is useful when TLS is terminated by a sidecar (Envoy, Istio) or a load balancer in front of the pod. Note that Kubernetes requires HTTPS for webhooks called by the API server directly — plain HTTP is only suitable when a TLS-terminating proxy sits between the API server and your pod.
 
 ---
 

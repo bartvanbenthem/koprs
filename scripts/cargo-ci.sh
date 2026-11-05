@@ -5,7 +5,7 @@
 #
 # USAGE
 #   ./scripts/cargo-ci.sh                  run all steps
-#   ./scripts/cargo-ci.sh --fast           fmt + check + unit tests only (no coverage)
+#   ./scripts/cargo-ci.sh --fast           fmt + check + clippy + unit/doc tests only
 #   ./scripts/cargo-ci.sh --no-clippy      skip clippy
 #   ./scripts/cargo-ci.sh --no-audit       skip cargo-audit
 #   ./scripts/cargo-ci.sh --no-integration skip integration tests
@@ -35,7 +35,7 @@
 #                 Code formatter — checked with `cargo fmt --check`.
 #
 # clippy          rustup component add clippy
-#                 Linter — run with -D warnings and pedantic group.
+#                 Linter — run on all targets and features with -D warnings.
 #
 # llvm-tools-preview  rustup component add llvm-tools-preview
 #                 Low-level LLVM tooling required by cargo-llvm-cov.
@@ -81,21 +81,25 @@ header()  { echo -e "\n${BOLD}━━━  $*  ━━━${RESET}"; }
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 RUN_AUDIT=true
+RUN_CLIPPY=true
 RUN_INTEGRATION=true
 RUN_DOC=true
 RUN_COVERAGE=true
 RUN_BENCH=false
 COVERAGE_THRESHOLD=""   # e.g. "80" — empty means no threshold check
+FAST=false
 
 for arg in "$@"; do
   case $arg in
     --no-audit)               RUN_AUDIT=false ;;
+    --no-clippy)              RUN_CLIPPY=false ;;
     --no-integration)         RUN_INTEGRATION=false ;;
     --no-doc)                 RUN_DOC=false ;;
     --no-coverage)            RUN_COVERAGE=false ;;
     --bench)                  RUN_BENCH=true ;;
     --coverage-fail-under=*)  COVERAGE_THRESHOLD="${arg#*=}" ;;
     --fast)
+      FAST=true
       RUN_AUDIT=false
       RUN_INTEGRATION=false; RUN_DOC=false; RUN_COVERAGE=false
       ;;
@@ -149,7 +153,13 @@ try_step "cargo fmt (check)" \
 try_step "cargo check (all targets)" \
   cargo check --all-targets --all-features
 
-# ── 3. Unit tests ─────────────────────────────────────────────────────────────
+# ── 3. Clippy ─────────────────────────────────────────────────────────────────
+if $RUN_CLIPPY; then
+  try_step "cargo clippy (-D warnings)" \
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+fi
+
+# ── 4. Unit tests ─────────────────────────────────────────────────────────────
 try_step "cargo test (lib + unit)" \
   cargo test --lib --all-features -- --nocapture
 
@@ -159,8 +169,11 @@ try_step "cargo test (doc)" \
 
 # ── 6. Integration tests ──────────────────────────────────────────────────────
 if $RUN_INTEGRATION; then
-  try_step "cargo test (integration)" \
-    cargo test --tests --all-features -- --nocapture
+  # Requires a reachable cluster (e.g. kind) for koprs and koprs-external.
+  for crate in koprs koprs-admission koprs-external; do
+    try_step "cargo test (integration: $crate)" \
+      cargo test -p "$crate" --features integration --test integration
+  done
 fi
 
 # ── 7. LLVM coverage ──────────────────────────────────────────────────────────
@@ -185,9 +198,12 @@ if $RUN_COVERAGE; then
       fi
 
       # Run coverage over all tests in one pass so instrumentation is shared
+      # Unit tests only: `--all-features` would enable the `integration`
+      # features, which need a live cluster.
       cargo llvm-cov \
-        --all-features \
+        --features koprs-external/object-store \
         --workspace \
+        --lib \
         --lcov --output-path target/llvm-cov/lcov.info \
         "${extra_flags[@]+"${extra_flags[@]}"}"
 
@@ -210,13 +226,15 @@ if $RUN_COVERAGE; then
 fi
 
 # ── 8. Release build (smoke-test) ─────────────────────────────────────────────
-try_step "cargo build (release)" \
-  cargo build --release --all-features
+if ! $FAST; then
+  try_step "cargo build (release)" \
+    cargo build --release --all-features
+fi
 
 # ── 9. Documentation ──────────────────────────────────────────────────────────
 if $RUN_DOC; then
-  try_step "cargo doc (no deps)" \
-    cargo doc --no-deps --all-features --document-private-items
+  try_step "cargo doc (no deps, -D warnings)" \
+    env RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 fi
 
 # ── 10. Security audit ────────────────────────────────────────────────────────
@@ -231,7 +249,9 @@ if $RUN_AUDIT; then
 fi
 
 # ── 11. Unused dependencies ───────────────────────────────────────────────────
-if cargo +nightly udeps --version &>/dev/null 2>&1; then
+if $FAST; then
+  :
+elif cargo +nightly udeps --version &>/dev/null 2>&1; then
   try_step "cargo udeps (nightly)" \
     cargo +nightly udeps --all-targets --all-features
 else

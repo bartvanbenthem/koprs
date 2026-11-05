@@ -1,116 +1,59 @@
-use kube::api::{DeleteParams, ListParams, Patch, PatchParams};
-use kube::{Api, Client, ResourceExt};
-use serde_json::json;
-use tracing::info;
+//! Label-based garbage collection of resources an operator no longer wants.
 
-use crate::error::Result;
-use crate::scope::ApiScope;
+use kube::api::{DeleteParams, ListParams, Preconditions};
+use kube::{Client, ResourceExt};
+use tracing::{debug, info};
+
+use crate::error::{KubeGenericError, Result};
+use crate::scope::ListScope;
 use crate::traits::KubeResource;
-
-// ---------------------------------------------------------------------------
-// Private core helper
-// ---------------------------------------------------------------------------
-
-/// Shared GC loop. Operates on a pre-built listing `Api<T>` and a
-/// per-resource `Api<T>` factory so it works for both cluster and namespaced
-/// resources without duplicating the loop body.
-///
-/// `is_desired` returns `true` for any resource that should be kept.
-async fn gc_inner<T, F>(
-    list_api: Api<T>,
-    make_api: impl Fn(&str) -> Api<T>,
-    label_selector: &str,
-    is_desired: F,
-) -> Result<()>
-where
-    T: KubeResource,
-    F: Fn(&T) -> bool,
-{
-    let existing = list_api
-        .list(&ListParams::default().labels(label_selector))
-        .await?;
-
-    for resource in existing {
-        let name = resource.name_any();
-        let ns = resource.namespace().unwrap_or_default();
-        let api = make_api(&ns);
-
-        if is_desired(&resource) {
-            continue;
-        }
-
-        if resource.meta().deletion_timestamp.is_some() {
-            info!(%name, %ns, "Resource is terminating — clearing finalizers");
-            clear_finalizers(&api, &name).await;
-            continue;
-        }
-
-        info!(%name, %ns, "Deleting orphaned resource");
-        match api.delete(&name, &DeleteParams::foreground()).await {
-            Ok(_) => clear_finalizers(&api, &name).await,
-            Err(kube::Error::Api(e)) if e.code == 404 => {
-                info!(%name, "Already deleted, skipping");
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-/// Force-clear all finalizers on a resource to unblock stuck terminations.
-/// Errors are intentionally swallowed — the resource may already be gone.
-async fn clear_finalizers<T>(api: &Api<T>, name: &str)
-where
-    T: KubeResource,
-{
-    let patch = json!({ "metadata": { "finalizers": null } });
-    let _ = api
-        .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
-        .await;
-}
-
-// ---------------------------------------------------------------------------
-// Generic public API
-// ---------------------------------------------------------------------------
 
 /// Garbage collect orphaned Kubernetes resources.
 ///
-/// Lists all resources of type `T` matching `label_selector` and deletes any
-/// for which `is_desired` returns `false`. Resources already in termination
-/// are unblocked by clearing their finalizers.
+/// Lists resources of type `T` in `scope` that match `label_selector` and
+/// deletes every one for which `is_desired` returns `false`.
 ///
-/// Accepts any scope and a predicate: pass
-/// [`Cluster`][crate::scope::Cluster] for cluster-scoped resources or
-/// [`Namespaced`][crate::scope::Namespaced] for namespaced ones.
+/// * **Scope is respected for both listing and deleting.** With
+///   [`Namespaced`][crate::scope::Namespaced] only that namespace is listed;
+///   with [`AllNamespaces`][crate::scope::AllNamespaces] each object is
+///   deleted in the namespace it was found in; with
+///   [`Cluster`][crate::scope::Cluster] cluster-scoped objects are deleted.
+/// * **Finalizers are never touched.** Objects that are already terminating
+///   are skipped, so the controllers that own their finalizers (and
+///   Kubernetes' own `foregroundDeletion` / `pvc-protection` finalizers) can
+///   finish cleanup.
+/// * **Deletes are UID-guarded.** Each delete carries a UID precondition, so
+///   an object that was deleted and re-created under the same name between
+///   the list and the delete is left alone.
+/// * Deletion uses background propagation (the Kubernetes default): the
+///   object is removed immediately and its dependents are garbage collected
+///   asynchronously by Kubernetes.
+///
+/// Make the selector specific to **one owner** (for example
+/// `managed-by=my-operator,my-operator/owner=<cr-name>`). A selector shared by
+/// several CRs makes each CR's GC delete the others' resources.
+///
+/// # Errors
+///
+/// Returns [`KubeGenericError::Config`] if `label_selector` is empty — that
+/// would select every `T` in the scope.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use std::collections::HashSet;
 /// use koprs::error::KubeGenericError;
 /// use kube::Client;
 /// use kube::ResourceExt;
 /// use koprs::gc::gc_resources;
 /// use koprs::scope::Namespaced;
-/// use koprs::traits::NamespacedResource;
+/// use k8s_openapi::api::core::v1::ConfigMap;
 ///
-/// # async fn example<MyCR: NamespacedResource>(client: Client) -> Result<(), KubeGenericError> {
-/// let desired: HashSet<(String, String)> = HashSet::from([
-///     ("default".to_string(), "my-resource".to_string()),
-/// ]);
-/// gc_resources::<MyCR, _>(
+/// # async fn example(client: Client) -> Result<(), KubeGenericError> {
+/// gc_resources::<ConfigMap, _>(
 ///     client,
 ///     Namespaced("default"),
-///     "app=my-operator",
-///     |r| {
-///         let ns = r.namespace().unwrap_or_default();
-///         desired.contains(&(ns, r.name_any()))
-///     },
+///     "app.kubernetes.io/managed-by=my-operator,my-operator/owner=my-cr",
+///     |cm| cm.name_any() == "my-cr-config",
 /// ).await?;
 /// # Ok(())
 /// # }
@@ -123,18 +66,57 @@ pub async fn gc_resources<T, Scope>(
 ) -> Result<()>
 where
     T: KubeResource,
-    Scope: ApiScope<T>,
+    Scope: ListScope<T>,
 {
-    let kind = T::kind(&());
-    info!(%kind, %label_selector, "Starting GC");
+    if label_selector.trim().is_empty() {
+        return Err(KubeGenericError::Config(
+            "gc_resources requires a non-empty label selector".into(),
+        ));
+    }
 
-    let list_api: Api<T> = Api::all(client.clone());
-    let scoped_api: Api<T> = scope.into_api(client);
-    gc_inner(
-        list_api,
-        |_ns| scoped_api.clone(),
-        label_selector,
-        is_desired,
-    )
-    .await
+    let kind = T::kind(&());
+    debug!(%kind, %label_selector, "Starting GC");
+
+    let existing = scope
+        .into_api(client.clone())
+        .list(&ListParams::default().labels(label_selector))
+        .await?;
+
+    for resource in existing {
+        if is_desired(&resource) {
+            continue;
+        }
+
+        let name = resource.name_any();
+        let ns = resource.namespace();
+        let ns_display = ns.as_deref().unwrap_or("");
+
+        if resource.meta().deletion_timestamp.is_some() {
+            debug!(%kind, %name, ns = %ns_display, "Orphan already terminating, skipping");
+            continue;
+        }
+
+        let params = DeleteParams {
+            preconditions: resource.uid().map(|uid| Preconditions {
+                uid: Some(uid),
+                resource_version: None,
+            }),
+            ..DeleteParams::background()
+        };
+
+        info!(%kind, %name, ns = %ns_display, "Deleting orphaned resource");
+        let api = scope.object_api(client.clone(), ns.as_deref());
+        match api.delete(&name, &params).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(e)) if e.code == 404 => {
+                debug!(%kind, %name, "Already deleted, skipping");
+            }
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                debug!(%kind, %name, "Object was replaced since listing, skipping");
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(())
 }

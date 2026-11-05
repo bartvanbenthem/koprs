@@ -51,15 +51,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
-use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Client;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{KubeGenericError, Result};
+use crate::leader::{LeaderElectionConfig, LeaderElector};
 use crate::observability::{Metrics, serve_metrics};
 use crate::traits::KubeResource;
+
+/// Upper bound on how long [`ControllerBuilder::run`] waits to release the
+/// leader lease during shutdown.
+const LEASE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Re-exports — operators only need `use koprs::controller::*`
@@ -167,6 +169,17 @@ where
     fn error_policy(&self, _cr: Arc<CR>, _err: &Self::Error, _ctx: Arc<Context<T>>) -> Action {
         Action::requeue(Duration::from_secs(30))
     }
+
+    /// Map an error to the `error` label of the `reconcile_errors_total` metric.
+    ///
+    /// The returned value **must come from a small, fixed set** — never embed
+    /// object names, messages, or other request data, or the metric's
+    /// cardinality grows without bound. Defaults to `"reconcile_error"`.
+    /// When your error type is [`KubeGenericError`], return
+    /// [`KubeGenericError::metric_label`].
+    fn error_label(&self, _err: &Self::Error) -> &'static str {
+        "reconcile_error"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +237,14 @@ pub(crate) async fn serve_health(listener: tokio::net::TcpListener, ready: Arc<A
 // Internal: graceful shutdown signal
 // ---------------------------------------------------------------------------
 
+/// Resolves once the shutdown flag flips to `true`. Never resolves if the
+/// sender is dropped without signalling.
+async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    if rx.wait_for(|stop| *stop).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// Resolves on SIGTERM (Unix) or Ctrl+C (all platforms).
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -242,206 +263,6 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     ctrl_c.await;
-}
-
-// ---------------------------------------------------------------------------
-// Internal: leader election
-// ---------------------------------------------------------------------------
-
-pub(crate) struct LeaderElectionConfig {
-    pub(crate) namespace: String,
-    pub(crate) name: String,
-    pub(crate) identity: String,
-    pub(crate) lease_duration_secs: i32,
-    pub(crate) renew_period: Duration,
-    pub(crate) retry_period: Duration,
-}
-
-/// Attempt to acquire or renew the Lease.
-///
-/// Returns `true` if this identity now holds the lease.
-/// Returns `false` if another identity holds a non-expired lease.
-/// Optimistic locking: passes `resourceVersion` to detect concurrent writers.
-pub(crate) async fn try_acquire_or_renew(
-    config: &LeaderElectionConfig,
-    client: &Client,
-) -> Result<bool> {
-    let api: kube::Api<Lease> = kube::Api::namespaced(client.clone(), &config.namespace);
-    let now = k8s_openapi::jiff::Timestamp::now();
-    let now_micro = MicroTime(now);
-
-    let existing = api
-        .get(&config.name)
-        .await
-        .map(Some)
-        .or_else(|e| match &e {
-            kube::Error::Api(ae) if ae.code == 404 => Ok(None),
-            _ => Err(KubeGenericError::Kube(e)),
-        })?;
-
-    match existing {
-        None => {
-            let lease = build_lease(
-                &config.name,
-                &config.namespace,
-                &config.identity,
-                config.lease_duration_secs,
-                now_micro.clone(),
-                now_micro,
-                None,
-                Some(0),
-            );
-            match api.create(&kube::api::PostParams::default(), &lease).await {
-                Ok(_) => Ok(true),
-                Err(kube::Error::Api(e)) if e.code == 409 => Ok(false),
-                Err(e) => Err(KubeGenericError::Kube(e)),
-            }
-        }
-        Some(existing) => {
-            let spec = existing.spec.as_ref();
-            let holder = spec.and_then(|s| s.holder_identity.as_deref());
-            let renew_time = spec.and_then(|s| s.renew_time.as_ref()).map(|t| t.0);
-            let duration_secs = spec
-                .and_then(|s| s.lease_duration_seconds)
-                .unwrap_or(config.lease_duration_secs);
-
-            let is_expired = renew_time.map_or(true, |rt| {
-                now > rt + k8s_openapi::jiff::SignedDuration::new(duration_secs as i64, 0)
-            });
-
-            if holder != Some(config.identity.as_str()) && !is_expired {
-                return Ok(false);
-            }
-
-            let transitioning = holder != Some(config.identity.as_str());
-            let acquire_time = if transitioning {
-                now_micro.clone()
-            } else {
-                spec.and_then(|s| s.acquire_time.clone())
-                    .unwrap_or_else(|| now_micro.clone())
-            };
-            let transitions = spec
-                .and_then(|s| s.lease_transitions)
-                .map(|t| if transitioning { t + 1 } else { t });
-
-            let new_lease = build_lease(
-                &config.name,
-                &config.namespace,
-                &config.identity,
-                config.lease_duration_secs,
-                acquire_time,
-                now_micro,
-                existing.metadata.resource_version.clone(),
-                transitions,
-            );
-
-            match api
-                .replace(&config.name, &kube::api::PostParams::default(), &new_lease)
-                .await
-            {
-                Ok(_) => Ok(true),
-                Err(kube::Error::Api(e)) if e.code == 409 => Ok(false),
-                Err(e) => Err(KubeGenericError::Kube(e)),
-            }
-        }
-    }
-}
-
-pub(crate) fn build_lease(
-    name: &str,
-    namespace: &str,
-    identity: &str,
-    lease_duration_secs: i32,
-    acquire_time: MicroTime,
-    renew_time: MicroTime,
-    resource_version: Option<String>,
-    lease_transitions: Option<i32>,
-) -> Lease {
-    Lease {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
-            resource_version,
-            ..Default::default()
-        },
-        spec: Some(LeaseSpec {
-            holder_identity: Some(identity.to_string()),
-            lease_duration_seconds: Some(lease_duration_secs),
-            acquire_time: Some(acquire_time),
-            renew_time: Some(renew_time),
-            lease_transitions,
-            ..Default::default()
-        }),
-    }
-}
-
-/// Block until this identity successfully acquires the Lease.
-async fn acquire_leader_lease(config: &LeaderElectionConfig, client: &Client) -> Result<()> {
-    info!(
-        identity = %config.identity,
-        lease = %config.name,
-        ns = %config.namespace,
-        "Waiting to become leader"
-    );
-    loop {
-        match try_acquire_or_renew(config, client).await {
-            Ok(true) => {
-                info!(identity = %config.identity, "Acquired leader lease");
-                return Ok(());
-            }
-            Ok(false) => {
-                debug!(identity = %config.identity, "Lease held by another, retrying");
-                tokio::time::sleep(config.retry_period).await;
-            }
-            Err(e) => {
-                warn!(error = %e, "Error acquiring leader lease, retrying");
-                tokio::time::sleep(config.retry_period).await;
-            }
-        }
-    }
-}
-
-/// Periodically renew the Lease; signals `stop_tx` when the lease is
-/// definitively lost (taken by another replica or unrecoverable API errors).
-async fn renew_leader_lease_loop(
-    config: LeaderElectionConfig,
-    client: Client,
-    stop_tx: tokio::sync::watch::Sender<bool>,
-) {
-    let mut consecutive_errors: u32 = 0;
-    loop {
-        tokio::time::sleep(config.renew_period).await;
-        match try_acquire_or_renew(&config, &client).await {
-            Ok(true) => {
-                consecutive_errors = 0;
-                debug!(identity = %config.identity, "Leader lease renewed");
-            }
-            Ok(false) => {
-                error!(
-                    identity = %config.identity,
-                    "Leader lease taken by another replica — stopping controller"
-                );
-                stop_tx.send(true).ok();
-                return;
-            }
-            Err(e) => {
-                consecutive_errors += 1;
-                warn!(
-                    error = %e,
-                    consecutive_errors,
-                    "Failed to renew leader lease"
-                );
-                if consecutive_errors >= 3 {
-                    error!(
-                        identity = %config.identity,
-                        "Could not renew leader lease after 3 attempts — stopping controller"
-                    );
-                    stop_tx.send(true).ok();
-                    return;
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -507,8 +328,18 @@ where
     pub(crate) graceful_shutdown: bool,
     pub(crate) reconcile_timeout: Option<Duration>,
     pub(crate) leader_election: Option<LeaderElectionConfig>,
+    pub(crate) leader_election_timings: Option<LeaderElectionTimings>,
+    pub(crate) leader_election_identity: Option<String>,
     pub(crate) concurrency: Option<u16>,
     _phantom: PhantomData<T>,
+}
+
+/// Timings supplied through [`ControllerBuilder::leader_election_timings`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LeaderElectionTimings {
+    pub(crate) lease_duration: Duration,
+    pub(crate) renew_deadline: Duration,
+    pub(crate) retry_period: Duration,
 }
 
 impl<CR, T> ControllerBuilder<CR, T>
@@ -531,6 +362,8 @@ where
             graceful_shutdown: false,
             reconcile_timeout: None,
             leader_election: None,
+            leader_election_timings: None,
+            leader_election_identity: None,
             concurrency: None,
             _phantom: PhantomData,
         }
@@ -538,8 +371,12 @@ where
 
     /// Start a health probe HTTP server on `0.0.0.0:<port>`.
     ///
-    /// `GET /healthz` always returns `200 OK`.
-    /// `GET /readyz` returns `503` until the first reconcile result, then `200 OK`.
+    /// `GET /healthz` always returns `200 OK` (liveness).
+    /// `GET /readyz` returns `200 OK` once the operator has finished starting
+    /// up (servers bound, configuration validated) and `503` again after a
+    /// shutdown signal. Readiness does **not** depend on leadership or on a
+    /// first reconcile, so standby replicas and operators with zero CRs are
+    /// Ready and Deployment rollouts are never blocked.
     ///
     /// If the port is already in use, [`run`](ControllerBuilder::run) returns
     /// an error before the controller loop starts.
@@ -551,9 +388,10 @@ where
     /// Start a Prometheus metrics server on `0.0.0.0:<port>`.
     ///
     /// `GET /metrics` returns reconcile counts, error counts (by kind and
-    /// error), and reconcile duration histograms in Prometheus text
-    /// exposition format. Recording happens automatically around every
-    /// reconcile — see [`Metrics`] for the full list of collectors.
+    /// [error label](Reconciler::error_label)), and reconcile duration
+    /// histograms in Prometheus text exposition format. Recording happens
+    /// automatically around every reconcile — see [`Metrics`] for the full
+    /// list of collectors.
     ///
     /// If the port is already in use, [`run`](ControllerBuilder::run) returns
     /// an error before the controller loop starts.
@@ -562,10 +400,14 @@ where
         self
     }
 
-    /// Stop the controller loop cleanly on SIGTERM or Ctrl+C.
+    /// Stop the controller cleanly on SIGTERM or Ctrl+C.
     ///
-    /// The loop stops accepting new work; reconciles already running inside
-    /// `kube-runtime` are allowed to complete.
+    /// On the signal, `/readyz` switches to `503`, the controller stops
+    /// starting new reconciles, and reconciles already in flight are allowed
+    /// to finish (bound them with [`reconcile_timeout`](Self::reconcile_timeout)).
+    /// With leader election enabled the lease is then released so a standby
+    /// takes over immediately. A replica still waiting for leadership returns
+    /// straight away.
     pub fn graceful_shutdown(mut self) -> Self {
         self.graceful_shutdown = true;
         self
@@ -573,13 +415,22 @@ where
 
     /// Enable Kubernetes Lease-based leader election.
     ///
-    /// [`run`](ControllerBuilder::run) blocks until this pod acquires the
-    /// named `Lease` object in `namespace`, then starts the controller. A
-    /// background task renews the lease every 5 seconds (lease duration: 15 s).
-    /// If the lease is lost the controller stops cleanly.
+    /// [`run`](ControllerBuilder::run) waits until this pod acquires the named
+    /// `Lease` in `namespace`, then starts the controller. Defaults follow
+    /// client-go: lease duration 15s, renew deadline 10s, retry period 2s
+    /// (see [`leader_election_timings`](Self::leader_election_timings)).
+    ///
+    /// Expiry is judged with the local monotonic clock, so clock skew between
+    /// nodes cannot produce two leaders. If the lease cannot be renewed within
+    /// the renew deadline, or another replica takes it, the controller is
+    /// stopped **immediately** (in-flight reconciles are cancelled) and `run`
+    /// returns [`KubeGenericError::LeaderElectionLost`]. Exit the process with
+    /// a non-zero status on that error so Kubernetes restarts the pod and it
+    /// campaigns again.
     ///
     /// The pod's identity defaults to `$POD_NAME` (downward API) falling back
-    /// to `$HOSTNAME`.
+    /// to `$HOSTNAME`. If neither is set, `run` returns a configuration error
+    /// rather than risk two replicas sharing an identity.
     pub fn leader_election(
         mut self,
         namespace: impl Into<String>,
@@ -587,22 +438,19 @@ where
     ) -> Self {
         let identity = std::env::var("POD_NAME")
             .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "unknown".to_string());
-        self.leader_election = Some(LeaderElectionConfig {
-            namespace: namespace.into(),
-            name: name.into(),
+            .unwrap_or_default();
+        self.leader_election = Some(LeaderElectionConfig::new(
+            namespace.into(),
+            name.into(),
             identity,
-            lease_duration_secs: 15,
-            renew_period: Duration::from_secs(5),
-            retry_period: Duration::from_secs(2),
-        });
+        ));
         self
     }
 
     /// Cancel and requeue any reconcile that runs longer than `timeout`.
     ///
-    /// The reconciler is given `Action::requeue(timeout)` on expiry so
-    /// the resource is retried after the same duration.
+    /// The resource is requeued after the same duration and the attempt is
+    /// counted as a failure with error label `"timeout"` in the metrics.
     pub fn reconcile_timeout(mut self, timeout: Duration) -> Self {
         self.reconcile_timeout = Some(timeout);
         self
@@ -623,9 +471,9 @@ where
 
     /// Limit the number of reconciles that may run concurrently.
     ///
-    /// Defaults to `0` (unbounded). Set to a positive value to cap concurrent
-    /// reconciles across all objects. A single object is never reconciled
-    /// concurrently regardless of this setting.
+    /// Unbounded by default. Set to a positive value to cap concurrent
+    /// reconciles across all objects; `0` means unbounded. A single object is
+    /// never reconciled concurrently regardless of this setting.
     pub fn concurrency(mut self, n: u16) -> Self {
         self.concurrency = Some(n);
         self
@@ -633,31 +481,72 @@ where
 
     /// Override the timing parameters for leader election.
     ///
-    /// Must be called **after** [`.leader_election()`](ControllerBuilder::leader_election).
+    /// May be called before or after
+    /// [`.leader_election()`](ControllerBuilder::leader_election). The
+    /// semantics match client-go:
     ///
-    /// | Parameter | Meaning |
-    /// |-----------|---------|
-    /// | `lease_duration` | How long the lease is valid without renewal |
-    /// | `renew_period` | How often the leader renews the lease |
-    /// | `retry_period` | How often a non-leader retries acquisition |
+    /// | Parameter | Meaning | Default |
+    /// |-----------|---------|---------|
+    /// | `lease_duration` | How long candidates wait, after last seeing the lease change, before taking it over | 15s |
+    /// | `renew_deadline` | How long the leader keeps retrying a renewal before it steps down | 10s |
+    /// | `retry_period` | Interval between acquire / renew attempts | 2s |
     ///
-    /// # Panics
-    ///
-    /// Panics if called before `.leader_election()`.
+    /// [`run`](ControllerBuilder::run) returns
+    /// [`KubeGenericError::Config`] unless
+    /// `lease_duration > renew_deadline > retry_period > 0`, or if this is set
+    /// without `.leader_election()`.
     pub fn leader_election_timings(
         mut self,
         lease_duration: Duration,
-        renew_period: Duration,
+        renew_deadline: Duration,
         retry_period: Duration,
     ) -> Self {
-        let le = self
-            .leader_election
-            .as_mut()
-            .expect("leader_election_timings must be called after leader_election");
-        le.lease_duration_secs = lease_duration.as_secs() as i32;
-        le.renew_period = renew_period;
-        le.retry_period = retry_period;
+        self.leader_election_timings = Some(LeaderElectionTimings {
+            lease_duration,
+            renew_deadline,
+            retry_period,
+        });
         self
+    }
+
+    /// Override the leader-election identity written to the Lease.
+    ///
+    /// Defaults to `$POD_NAME`, then `$HOSTNAME`. Every replica must use a
+    /// distinct identity. May be called before or after `.leader_election()`.
+    pub fn leader_election_identity(mut self, identity: impl Into<String>) -> Self {
+        self.leader_election_identity = Some(identity.into());
+        self
+    }
+
+    /// Combine `.leader_election()` and `.leader_election_timings()` into a
+    /// validated configuration.
+    pub(crate) fn resolve_leader_election(&self) -> Result<Option<LeaderElectionConfig>> {
+        match (&self.leader_election, self.leader_election_timings) {
+            (None, None) => Ok(None),
+            (None, Some(_)) => Err(KubeGenericError::Config(
+                "leader_election_timings() was set without leader_election()".into(),
+            )),
+            (Some(cfg), timings) => {
+                let mut cfg = cfg.clone();
+                if let Some(identity) = &self.leader_election_identity {
+                    cfg.identity.clone_from(identity);
+                }
+                if let Some(t) = timings {
+                    cfg.lease_duration = t.lease_duration;
+                    cfg.renew_deadline = t.renew_deadline;
+                    cfg.retry_period = t.retry_period;
+                }
+                if cfg.identity.is_empty() {
+                    return Err(KubeGenericError::Config(
+                        "leader election needs a unique identity: set POD_NAME \
+                         (downward API) or HOSTNAME"
+                            .into(),
+                    ));
+                }
+                cfg.validate()?;
+                Ok(Some(cfg))
+            }
+        }
     }
 
     /// Watch child resources that this CR owns via Kubernetes owner references.
@@ -782,16 +671,26 @@ where
     /// Start the reconciliation loop.
     ///
     /// In order:
-    /// 1. Binds the health server if `.health_port()` was set.
-    /// 2. Blocks until the leader lease is acquired if `.leader_election()` was set.
-    /// 3. Starts the reconcile loop, wrapping each call with a timeout if set.
-    /// 4. Stops cleanly on shutdown signal or lease loss.
+    /// 1. Validates the configuration and binds the health and metrics servers.
+    /// 2. Marks `/readyz` ready.
+    /// 3. Waits for the leader lease if `.leader_election()` was set (returns
+    ///    `Ok(())` if a shutdown signal arrives first).
+    /// 4. Runs the reconcile loop, wrapping each call with a timeout if set.
+    /// 5. On a shutdown signal, lets in-flight reconciles finish, then
+    ///    releases the lease and returns `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KubeGenericError::LeaderElectionLost`] if leadership is lost
+    /// while running. The controller has already been stopped; exit the
+    /// process so the pod restarts and campaigns again.
     pub async fn run<R>(self, reconciler: R, context: Arc<Context<T>>) -> Result<()>
     where
         R: Reconciler<CR, T>,
     {
-        let kind = CR::kind(&());
+        let kind = CR::kind(&()).to_string();
         let client = context.client.clone();
+        let leader_config = self.resolve_leader_election()?;
         info!(%kind, "Starting controller");
 
         // --- Health probes ---
@@ -814,28 +713,36 @@ where
             None
         };
 
-        // --- Stop signal channel (shared by shutdown + lease loss) ---
-        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
-        let has_stop = self.graceful_shutdown || self.leader_election.is_some();
-
+        // --- Shutdown signal ---
+        // `_shutdown_tx` is kept alive for the whole function so receivers
+        // never observe a closed channel.
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         if self.graceful_shutdown {
-            let tx = stop_tx.clone();
-            let kind_owned = kind.to_string();
+            let tx = _shutdown_tx.clone();
+            let ready = ready.clone();
+            let kind = kind.clone();
             tokio::spawn(async move {
                 shutdown_signal().await;
-                info!(kind = %kind_owned, "Shutdown signal received");
+                info!(%kind, "Shutdown signal received");
+                ready.store(false, Ordering::Release);
                 tx.send(true).ok();
             });
         }
 
-        // --- Leader election ---
-        if let Some(le) = self.leader_election {
-            acquire_leader_lease(&le, &client).await?;
-            let tx = stop_tx.clone();
-            let client_le = client.clone();
-            tokio::spawn(async move {
-                renew_leader_lease_loop(le, client_le, tx).await;
-            });
+        // Start-up is complete: report ready. Standby replicas are ready too,
+        // so rolling updates are not blocked by leader election.
+        ready.store(true, Ordering::Release);
+
+        // --- Leader election: wait for the lease ---
+        let mut elector = leader_config.map(|cfg| LeaderElector::new(cfg, client.clone()));
+        if let Some(el) = elector.as_mut() {
+            tokio::select! {
+                () = el.acquire() => {}
+                () = wait_for_shutdown(shutdown_rx.clone()) => {
+                    info!(%kind, "Shutdown requested before leadership was acquired");
+                    return Ok(());
+                }
+            }
         }
 
         // --- Controller ---
@@ -846,65 +753,93 @@ where
         if let Some(configure) = self.configure {
             ctl = configure(ctl);
         }
+        if self.graceful_shutdown {
+            // kube-runtime stops scheduling new work and drains in-flight
+            // reconciles before the stream ends.
+            ctl = ctl.graceful_shutdown_on(wait_for_shutdown(shutdown_rx.clone()));
+        }
 
         let reconciler = Arc::new(reconciler);
         let error_policy_r = reconciler.clone();
-        let ready_ref = ready.clone();
         let reconcile_timeout = self.reconcile_timeout;
-        let kind_owned = kind.to_string();
+        let kind_label = kind.clone();
 
         let run_loop = ctl
             .run(
                 move |cr, ctx| {
                     let r = reconciler.clone();
                     let metrics = metrics.clone();
-                    let kind = kind_owned.clone();
+                    let kind = kind_label.clone();
                     async move {
                         let started = std::time::Instant::now();
-                        let result = if let Some(t) = reconcile_timeout {
-                            match tokio::time::timeout(t, r.reconcile(cr, ctx)).await {
-                                Ok(result) => result,
-                                Err(_) => {
-                                    warn!("Reconcile timed out after {t:?}, requeueing");
-                                    Ok(Action::requeue(t))
-                                }
-                            }
-                        } else {
-                            r.reconcile(cr, ctx).await
+                        let outcome = match reconcile_timeout {
+                            Some(t) => tokio::time::timeout(t, r.reconcile(cr, ctx))
+                                .await
+                                .map_err(|_| t),
+                            None => Ok(r.reconcile(cr, ctx).await),
                         };
-                        if let Some(m) = &metrics {
-                            match &result {
-                                Ok(_) => m.record_success(&kind, started.elapsed()),
-                                Err(e) => {
-                                    m.record_failure(&kind, &e.to_string(), started.elapsed())
+                        let elapsed = started.elapsed();
+                        match outcome {
+                            Ok(result) => {
+                                if let Some(m) = &metrics {
+                                    match &result {
+                                        Ok(_) => m.record_success(&kind, elapsed),
+                                        Err(e) => {
+                                            m.record_failure(&kind, r.error_label(e), elapsed)
+                                        }
+                                    }
                                 }
+                                result
+                            }
+                            Err(t) => {
+                                warn!(%kind, timeout = ?t, "Reconcile timed out, requeueing");
+                                if let Some(m) = &metrics {
+                                    m.record_failure(&kind, "timeout", elapsed);
+                                }
+                                Ok(Action::requeue(t))
                             }
                         }
-                        result
                     }
                 },
                 move |cr, err, ctx| error_policy_r.error_policy(cr, err, ctx),
                 context,
             )
-            .for_each(move |result| {
-                ready_ref.store(true, Ordering::Release);
-                async move {
-                    match result {
-                        Ok((obj, _)) => info!(name = %obj.name, "Reconcile succeeded"),
-                        Err(e) => warn!(error = %e, "Reconcile failed"),
-                    }
+            .for_each(|result| async move {
+                match result {
+                    Ok((obj, _)) => debug!(name = %obj.name, "Reconcile succeeded"),
+                    Err(e) => warn!(error = %e, "Reconcile failed"),
                 }
             });
 
-        if has_stop {
-            tokio::select! {
-                _ = run_loop => {},
-                _ = async move { stop_rx.wait_for(|v| *v).await.ok(); } => {},
+        let outcome = match elector.as_mut() {
+            Some(el) => {
+                tokio::select! {
+                    () = run_loop => Ok(()),
+                    lost = el.renew_until_lost() => {
+                        // Dropping `run_loop` cancels in-flight reconciles: we
+                        // are no longer the leader and must not keep writing.
+                        error!(%kind, error = %lost, "Stopping controller");
+                        Err(lost)
+                    }
+                }
             }
-        } else {
-            run_loop.await;
+            None => {
+                run_loop.await;
+                Ok(())
+            }
+        };
+
+        if outcome.is_ok()
+            && let Some(el) = elector.as_mut()
+        {
+            match tokio::time::timeout(LEASE_RELEASE_TIMEOUT, el.release()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!(error = %e, "Failed to release leader lease"),
+                Err(_) => warn!("Timed out releasing leader lease"),
+            }
         }
 
-        Ok(())
+        info!(%kind, "Controller stopped");
+        outcome
     }
 }

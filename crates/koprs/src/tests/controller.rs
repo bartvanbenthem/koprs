@@ -6,19 +6,14 @@ mod controller_tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use http::{Request, Response, StatusCode};
-    use k8s_openapi::api::coordination::v1::Lease;
+    use http::{Request, Response};
     use k8s_openapi::api::core::v1::ConfigMap;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
     use kube::Client;
     use kube::client::Body;
     use serde_json::json;
     use tower_test::mock;
 
-    use crate::controller::{
-        Action, Context, ControllerBuilder, LeaderElectionConfig, Reconciler, build_lease,
-        serve_health, try_acquire_or_renew,
-    };
+    use crate::controller::{Action, Context, ControllerBuilder, Reconciler, serve_health};
     use crate::error::KubeGenericError;
 
     // -----------------------------------------------------------------------
@@ -30,77 +25,6 @@ mod controller_tests {
     fn mock_client() -> (Client, MockHandle) {
         let (svc, handle) = mock::pair::<Request<Body>, Response<Body>>();
         (Client::new(svc, "default"), handle)
-    }
-
-    fn json_response(status: StatusCode, body: serde_json::Value) -> Response<Body> {
-        let bytes = serde_json::to_vec(&body).unwrap();
-        Response::builder()
-            .status(status)
-            .header("Content-Type", "application/json")
-            .body(Body::from(bytes))
-            .unwrap()
-    }
-
-    fn status_response(code: u16, reason: &str) -> Response<Body> {
-        json_response(
-            StatusCode::from_u16(code).unwrap(),
-            json!({
-                "apiVersion": "v1",
-                "kind": "Status",
-                "status": "Failure",
-                "reason": reason,
-                "code": code
-            }),
-        )
-    }
-
-    async fn read_body_json(req: Request<Body>) -> serde_json::Value {
-        use http_body_util::BodyExt as _;
-        let bytes = req.into_body().collect().await.unwrap().to_bytes();
-        serde_json::from_slice(&bytes).unwrap()
-    }
-
-    // -----------------------------------------------------------------------
-    // Lease JSON helpers
-    // -----------------------------------------------------------------------
-
-    /// Build a Lease JSON body. `renew_offset_secs`: negative means in the past.
-    fn lease_json(
-        holder: &str,
-        lease_duration_secs: i32,
-        renew_offset_secs: i64,
-        resource_version: &str,
-    ) -> serde_json::Value {
-        use chrono::SecondsFormat;
-        let renew_time = (chrono::Utc::now() + chrono::Duration::seconds(renew_offset_secs))
-            .to_rfc3339_opts(SecondsFormat::Micros, true);
-        json!({
-            "apiVersion": "coordination.k8s.io/v1",
-            "kind": "Lease",
-            "metadata": {
-                "name": "test-lease",
-                "namespace": "test-ns",
-                "resourceVersion": resource_version
-            },
-            "spec": {
-                "holderIdentity": holder,
-                "leaseDurationSeconds": lease_duration_secs,
-                "acquireTime": renew_time,
-                "renewTime": renew_time,
-                "leaseTransitions": 0
-            }
-        })
-    }
-
-    fn test_le_config(identity: &str) -> LeaderElectionConfig {
-        LeaderElectionConfig {
-            namespace: "test-ns".to_string(),
-            name: "test-lease".to_string(),
-            identity: identity.to_string(),
-            lease_duration_secs: 15,
-            renew_period: Duration::from_millis(50),
-            retry_period: Duration::from_millis(50),
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -351,297 +275,6 @@ mod controller_tests {
     }
 
     // -----------------------------------------------------------------------
-    // build_lease — pure function, verifies all fields
-    // -----------------------------------------------------------------------
-
-    fn now_micro() -> MicroTime {
-        MicroTime(k8s_openapi::jiff::Timestamp::now())
-    }
-
-    #[test]
-    fn build_lease_sets_name_and_namespace() {
-        let lease = build_lease(
-            "my-lease",
-            "my-ns",
-            "pod-1",
-            15,
-            now_micro(),
-            now_micro(),
-            None,
-            None,
-        );
-        assert_eq!(lease.metadata.name.as_deref(), Some("my-lease"));
-        assert_eq!(lease.metadata.namespace.as_deref(), Some("my-ns"));
-    }
-
-    #[test]
-    fn build_lease_sets_holder_identity() {
-        let lease = build_lease(
-            "l",
-            "ns",
-            "pod-42",
-            15,
-            now_micro(),
-            now_micro(),
-            None,
-            None,
-        );
-        let holder = lease
-            .spec
-            .as_ref()
-            .and_then(|s| s.holder_identity.as_deref());
-        assert_eq!(holder, Some("pod-42"));
-    }
-
-    #[test]
-    fn build_lease_sets_lease_duration() {
-        let lease = build_lease("l", "ns", "pod-1", 30, now_micro(), now_micro(), None, None);
-        let dur = lease.spec.as_ref().and_then(|s| s.lease_duration_seconds);
-        assert_eq!(dur, Some(30));
-    }
-
-    #[test]
-    fn build_lease_sets_resource_version_when_provided() {
-        let lease = build_lease(
-            "l",
-            "ns",
-            "pod-1",
-            15,
-            now_micro(),
-            now_micro(),
-            Some("42".to_string()),
-            None,
-        );
-        assert_eq!(lease.metadata.resource_version.as_deref(), Some("42"));
-    }
-
-    #[test]
-    fn build_lease_omits_resource_version_when_none() {
-        let lease = build_lease("l", "ns", "pod-1", 15, now_micro(), now_micro(), None, None);
-        assert!(lease.metadata.resource_version.is_none());
-    }
-
-    #[test]
-    fn build_lease_sets_transitions_when_provided() {
-        let lease = build_lease(
-            "l",
-            "ns",
-            "pod-1",
-            15,
-            now_micro(),
-            now_micro(),
-            None,
-            Some(3),
-        );
-        let t = lease.spec.as_ref().and_then(|s| s.lease_transitions);
-        assert_eq!(t, Some(3));
-    }
-
-    #[test]
-    fn build_lease_new_lease_gets_zero_transitions() {
-        // When creating a fresh lease, transitions should be Some(0) not None.
-        let lease = build_lease(
-            "l",
-            "ns",
-            "pod-1",
-            15,
-            now_micro(),
-            now_micro(),
-            None,
-            Some(0),
-        );
-        let t = lease.spec.as_ref().and_then(|s| s.lease_transitions);
-        assert_eq!(t, Some(0));
-    }
-
-    // -----------------------------------------------------------------------
-    // try_acquire_or_renew — mock HTTP, covers all 7 branches
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn acquire_creates_new_lease_when_none_exists() {
-        let (client, mut handle) = mock_client();
-        let config = test_le_config("pod-1");
-
-        let server = tokio::spawn(async move {
-            // GET → 404 (no lease)
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::GET);
-            send.send_response(status_response(404, "NotFound"));
-
-            // POST → 201 Created
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::POST);
-            let body = read_body_json(req).await;
-            assert_eq!(body["spec"]["holderIdentity"], "pod-1");
-            assert_eq!(body["spec"]["leaseTransitions"], 0);
-            send.send_response(json_response(
-                StatusCode::CREATED,
-                lease_json("pod-1", 15, 0, "1"),
-            ));
-        });
-
-        let result = try_acquire_or_renew(&config, &client).await;
-        assert_eq!(result.unwrap(), true);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn acquire_returns_false_when_create_conflicts() {
-        let (client, mut handle) = mock_client();
-        let config = test_le_config("pod-1");
-
-        let server = tokio::spawn(async move {
-            // GET → 404
-            let (_, send) = handle.next_request().await.unwrap();
-            send.send_response(status_response(404, "NotFound"));
-            // POST → 409 Conflict (another replica created it first)
-            let (_, send) = handle.next_request().await.unwrap();
-            send.send_response(status_response(409, "AlreadyExists"));
-        });
-
-        let result = try_acquire_or_renew(&config, &client).await;
-        assert_eq!(result.unwrap(), false);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn acquire_returns_false_when_held_by_another_not_expired() {
-        let (client, mut handle) = mock_client();
-        let config = test_le_config("pod-1");
-
-        let server = tokio::spawn(async move {
-            // GET → 200 with active lease held by other-pod (renewed 1s ago, duration 3600s)
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::GET);
-            send.send_response(json_response(
-                StatusCode::OK,
-                lease_json("other-pod", 3600, -1, "5"),
-            ));
-            // No further requests expected
-        });
-
-        let result = try_acquire_or_renew(&config, &client).await;
-        assert_eq!(result.unwrap(), false);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn acquire_takes_over_expired_lease_held_by_another() {
-        let (client, mut handle) = mock_client();
-        let config = test_le_config("pod-1");
-
-        let server = tokio::spawn(async move {
-            // GET → 200 with expired lease (renewed 100s ago, duration 15s)
-            let (_, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(
-                StatusCode::OK,
-                lease_json("other-pod", 15, -100, "5"),
-            ));
-            // PUT → 200 (replace succeeds)
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::PUT);
-            let body = read_body_json(req).await;
-            assert_eq!(body["spec"]["holderIdentity"], "pod-1");
-            assert_eq!(body["metadata"]["resourceVersion"], "5");
-            send.send_response(json_response(
-                StatusCode::OK,
-                lease_json("pod-1", 15, 0, "6"),
-            ));
-        });
-
-        let result = try_acquire_or_renew(&config, &client).await;
-        assert_eq!(result.unwrap(), true);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn renew_succeeds_when_we_already_hold_lease() {
-        let (client, mut handle) = mock_client();
-        let config = test_le_config("pod-1");
-
-        let server = tokio::spawn(async move {
-            // GET → 200 with our own lease (not expired)
-            let (_, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(
-                StatusCode::OK,
-                lease_json("pod-1", 15, -3, "9"),
-            ));
-            // PUT → 200 (renew succeeds)
-            let (req, send) = handle.next_request().await.unwrap();
-            assert_eq!(req.method(), http::Method::PUT);
-            let body = read_body_json(req).await;
-            assert_eq!(body["spec"]["holderIdentity"], "pod-1");
-            // acquireTime should be preserved (not reset) for a renewal
-            send.send_response(json_response(
-                StatusCode::OK,
-                lease_json("pod-1", 15, 0, "10"),
-            ));
-        });
-
-        let result = try_acquire_or_renew(&config, &client).await;
-        assert_eq!(result.unwrap(), true);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn renew_returns_false_when_replace_conflicts() {
-        let (client, mut handle) = mock_client();
-        let config = test_le_config("pod-1");
-
-        let server = tokio::spawn(async move {
-            // GET → 200 with own lease
-            let (_, send) = handle.next_request().await.unwrap();
-            send.send_response(json_response(
-                StatusCode::OK,
-                lease_json("pod-1", 15, -3, "9"),
-            ));
-            // PUT → 409 (concurrent writer, our resourceVersion is stale)
-            let (_, send) = handle.next_request().await.unwrap();
-            send.send_response(status_response(409, "Conflict"));
-        });
-
-        let result = try_acquire_or_renew(&config, &client).await;
-        assert_eq!(result.unwrap(), false);
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn acquire_propagates_api_error_on_get() {
-        let (client, mut handle) = mock_client();
-        let config = test_le_config("pod-1");
-
-        let server = tokio::spawn(async move {
-            // GET → 500 Internal Server Error
-            let (_, send) = handle.next_request().await.unwrap();
-            send.send_response(status_response(500, "InternalError"));
-        });
-
-        let result = try_acquire_or_renew(&config, &client).await;
-        assert!(result.is_err(), "expected Err on 500 API error");
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn acquire_propagates_api_error_on_post() {
-        let (client, mut handle) = mock_client();
-        let config = test_le_config("pod-1");
-
-        let server = tokio::spawn(async move {
-            // GET → 404
-            let (_, send) = handle.next_request().await.unwrap();
-            send.send_response(status_response(404, "NotFound"));
-            // POST → 500
-            let (_, send) = handle.next_request().await.unwrap();
-            send.send_response(status_response(500, "InternalError"));
-        });
-
-        let result = try_acquire_or_renew(&config, &client).await;
-        assert!(result.is_err(), "expected Err on 500 during create");
-        server.await.unwrap();
-    }
-
-    // -----------------------------------------------------------------------
     // ControllerBuilder — construction and configuration
     // -----------------------------------------------------------------------
 
@@ -792,9 +425,12 @@ mod controller_tests {
         let (client, _) = mock_client();
         let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
         let b = ControllerBuilder::<ConfigMap>::new(api).leader_election("ns", "lease");
-        let identity = &b.leader_election.unwrap().identity;
-        // Must not be empty; exact value depends on env ($POD_NAME / $HOSTNAME / "unknown")
-        assert!(!identity.is_empty());
+        let identity = b.leader_election.unwrap().identity;
+        // $POD_NAME, then $HOSTNAME; empty (rejected later by `run`) if neither is set.
+        let expected = std::env::var("POD_NAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_default();
+        assert_eq!(identity, expected);
     }
 
     #[tokio::test]
@@ -871,60 +507,137 @@ mod controller_tests {
         assert!(b.configure.is_some());
     }
 
-    #[tokio::test]
-    async fn builder_leader_election_timings_overrides_defaults() {
+    fn builder_with_identity(identity: &str) -> ControllerBuilder<ConfigMap> {
         let (client, _) = mock_client();
         let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
-        let b = ControllerBuilder::<ConfigMap>::new(api)
-            .leader_election("ops-ns", "my-op-leader")
+        let mut b =
+            ControllerBuilder::<ConfigMap>::new(api).leader_election("ops-ns", "my-op-leader");
+        b.leader_election.as_mut().unwrap().identity = identity.to_string();
+        b
+    }
+
+    #[tokio::test]
+    async fn builder_leader_election_defaults_follow_client_go() {
+        let cfg = builder_with_identity("pod-a")
+            .resolve_leader_election()
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.lease_duration, Duration::from_secs(15));
+        assert_eq!(cfg.renew_deadline, Duration::from_secs(10));
+        assert_eq!(cfg.retry_period, Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn builder_leader_election_timings_overrides_defaults() {
+        let cfg = builder_with_identity("pod-a")
+            .leader_election_timings(
+                Duration::from_secs(45),
+                Duration::from_secs(30),
+                Duration::from_secs(3),
+            )
+            .resolve_leader_election()
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.lease_duration, Duration::from_secs(45));
+        assert_eq!(cfg.renew_deadline, Duration::from_secs(30));
+        assert_eq!(cfg.retry_period, Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn builder_leader_election_timings_order_does_not_matter() {
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let mut b = ControllerBuilder::<ConfigMap>::new(api)
+            .leader_election_timings(
+                Duration::from_secs(20),
+                Duration::from_secs(12),
+                Duration::from_secs(4),
+            )
+            .leader_election("ops-ns", "lease");
+        b.leader_election.as_mut().unwrap().identity = "pod-a".into();
+        let cfg = b.resolve_leader_election().unwrap().unwrap();
+        assert_eq!(cfg.lease_duration, Duration::from_secs(20));
+    }
+
+    #[tokio::test]
+    async fn builder_leader_election_timings_without_leader_election_is_config_error() {
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let err = ControllerBuilder::<ConfigMap>::new(api)
             .leader_election_timings(
                 Duration::from_secs(45),
                 Duration::from_secs(10),
                 Duration::from_secs(3),
-            );
-        let le = b.leader_election.as_ref().unwrap();
-        assert_eq!(le.lease_duration_secs, 45);
-        assert_eq!(le.renew_period, Duration::from_secs(10));
-        assert_eq!(le.retry_period, Duration::from_secs(3));
+            )
+            .resolve_leader_election()
+            .unwrap_err();
+        assert!(matches!(err, KubeGenericError::Config(_)), "got {err:?}");
     }
 
     #[tokio::test]
-    #[should_panic(expected = "leader_election_timings must be called after leader_election")]
-    async fn builder_leader_election_timings_panics_when_no_leader_election() {
+    async fn builder_rejects_renew_deadline_not_shorter_than_lease_duration() {
+        let err = builder_with_identity("pod-a")
+            .leader_election_timings(
+                Duration::from_secs(10),
+                Duration::from_secs(10),
+                Duration::from_secs(2),
+            )
+            .resolve_leader_election()
+            .unwrap_err();
+        assert!(matches!(err, KubeGenericError::Config(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_retry_period_not_shorter_than_renew_deadline() {
+        let err = builder_with_identity("pod-a")
+            .leader_election_timings(
+                Duration::from_secs(15),
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            )
+            .resolve_leader_election()
+            .unwrap_err();
+        assert!(matches!(err, KubeGenericError::Config(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_empty_identity() {
+        let err = builder_with_identity("")
+            .resolve_leader_election()
+            .unwrap_err();
+        assert!(matches!(err, KubeGenericError::Config(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn builder_leader_election_identity_overrides_env() {
         let (client, _) = mock_client();
         let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
-        let _ = ControllerBuilder::<ConfigMap>::new(api).leader_election_timings(
-            Duration::from_secs(45),
-            Duration::from_secs(10),
-            Duration::from_secs(3),
-        );
+        let cfg = ControllerBuilder::<ConfigMap>::new(api)
+            .leader_election_identity("replica-7")
+            .leader_election("ns", "lease")
+            .resolve_leader_election()
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.identity, "replica-7");
     }
 
-    // -----------------------------------------------------------------------
-    // LeaderElectionConfig — default values
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn le_config_defaults_are_sensible() {
-        let cfg = test_le_config("pod-a");
-        assert_eq!(cfg.lease_duration_secs, 15);
-        // renew_period < lease_duration (3× safety margin)
-        assert!(cfg.renew_period.as_secs_f64() < cfg.lease_duration_secs as f64 / 2.0);
+    #[tokio::test]
+    async fn builder_without_leader_election_resolves_to_none() {
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client, "ns");
+        let b = ControllerBuilder::<ConfigMap>::new(api);
+        assert!(b.resolve_leader_election().unwrap().is_none());
     }
 
-    // -----------------------------------------------------------------------
-    // Lease deserialization round-trip
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn lease_json_round_trips_through_serde() {
-        // Verifies that our JSON helpers produce valid Lease payloads
-        // that k8s_openapi can deserialize (used in all mock responses above).
-        let json = lease_json("pod-1", 15, 0, "42");
-        let lease: Lease = serde_json::from_value(json).expect("failed to deserialize Lease JSON");
-        let spec = lease.spec.as_ref().unwrap();
-        assert_eq!(spec.holder_identity.as_deref(), Some("pod-1"));
-        assert_eq!(spec.lease_duration_seconds, Some(15));
-        assert_eq!(lease.metadata.resource_version.as_deref(), Some("42"));
+    #[tokio::test]
+    async fn run_future_is_send_so_it_can_be_spawned() {
+        fn assert_send<T: Send>(_: &T) {}
+        let (client, _) = mock_client();
+        let api = kube::Api::<ConfigMap>::namespaced(client.clone(), "ns");
+        let fut = ControllerBuilder::<ConfigMap>::new(api)
+            .graceful_shutdown()
+            .leader_election("ns", "lease")
+            .run(MockReconciler, Context::new(client));
+        assert_send(&fut);
     }
 }

@@ -16,10 +16,10 @@ use std::sync::Arc;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::{Api, Client, Resource, ResourceExt};
 use kube_runtime::reflector::ObjectRef;
-use tracing::info;
+use tracing::debug;
 
 use crate::error::{KubeGenericError, Result};
-use crate::scope::ApiScope;
+use crate::scope::ListScope;
 use crate::traits::KubeResource;
 
 // ---------------------------------------------------------------------------
@@ -59,8 +59,14 @@ where
             .name
             .clone()
             .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))?;
-        info!(%name, "Building ObjectRef");
-        refs.push(ObjectRef::new(&name));
+        debug!(%name, "Building ObjectRef");
+        let object_ref = ObjectRef::new(&name);
+        // Keep the namespace: a ref without it would requeue the wrong object
+        // (or nothing) for namespace-scoped resources listed across namespaces.
+        refs.push(match meta.namespace.as_deref() {
+            Some(ns) => object_ref.within(ns),
+            None => object_ref,
+        });
     }
     Ok(refs)
 }
@@ -172,7 +178,7 @@ pub fn set_owner_refs<T: KubeResource>(child: &mut T, refs: Vec<OwnerReference>)
 pub async fn make_object_refs<T, Scope>(client: Client, scope: Scope) -> Result<Vec<ObjectRef<T>>>
 where
     T: KubeResource,
-    Scope: ApiScope<T>,
+    Scope: ListScope<T>,
 {
     build_object_refs(scope.into_api(client)).await
 }
@@ -218,6 +224,51 @@ where
             return None;
         }
         Some(ObjectRef::<CR>::new(&owner).within(&ns))
+    }
+}
+
+/// Build a mapper closure that finds a CR owner from **two** labels on a
+/// trigger resource: one holding the CR's name and one holding its namespace.
+///
+/// Use this instead of [`owner_label_mapper`] when child resources can live in
+/// a different namespace than the CR that owns them (for example a CR that
+/// syncs a ConfigMap into `spec.targetNamespace`). [`owner_label_mapper`]
+/// would look the CR up in the child's namespace and miss it.
+///
+/// If the namespace label is absent, the trigger's own namespace is used.
+/// Returns `None` (drops the event) when the name label is absent or empty.
+///
+/// # Examples
+///
+/// ```no_run
+/// use k8s_openapi::api::core::v1::ConfigMap;
+/// use koprs::owners::owner_labels_mapper;
+///
+/// # type MyCR = ConfigMap;
+/// let _mapper = owner_labels_mapper::<ConfigMap, MyCR>(
+///     "my-operator/owner-name",
+///     "my-operator/owner-namespace",
+/// );
+/// ```
+pub fn owner_labels_mapper<Trigger, CR>(
+    name_label: impl Into<String>,
+    namespace_label: impl Into<String>,
+) -> impl Fn(Trigger) -> Option<ObjectRef<CR>>
+where
+    Trigger: KubeResource,
+    CR: KubeResource,
+{
+    let name_label = name_label.into();
+    let namespace_label = namespace_label.into();
+    move |resource: Trigger| {
+        let labels = resource.labels();
+        let owner = labels.get(&name_label).filter(|n| !n.is_empty())?;
+        let ns = labels
+            .get(&namespace_label)
+            .filter(|n| !n.is_empty())
+            .cloned()
+            .or_else(|| resource.namespace())?;
+        Some(ObjectRef::<CR>::new(owner).within(&ns))
     }
 }
 

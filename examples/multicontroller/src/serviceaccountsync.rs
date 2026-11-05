@@ -15,7 +15,7 @@ use tracing::{error, info};
 use koprs::controller::{Action, Context, Reconciler};
 use koprs::error::KubeGenericError;
 use koprs::events::{EventType, record_event};
-use koprs::finalizers::{add_finalizer_namespaced, remove_finalizers};
+use koprs::finalizers::{add_finalizer_namespaced, remove_finalizer};
 use koprs::gc::gc_resources;
 use koprs::is_being_deleted;
 use koprs::meta::ObjectMetaBuilder;
@@ -54,7 +54,7 @@ impl Reconciler<ServiceAccountSync> for ServiceAccountSyncReconciler {
             info!(cr = %name, "deletion timestamp set — running cleanup");
 
             let target_ns = &cr.spec.target_namespace;
-            let sa_name = service_account_name(&name);
+            let sa_name = service_account_name(&namespace, &name);
 
             match delete_resource::<ServiceAccount, _>(
                 client.clone(),
@@ -67,14 +67,16 @@ impl Reconciler<ServiceAccountSync> for ServiceAccountSyncReconciler {
                 Ok(false) => info!(sa = %sa_name, "ServiceAccount was already gone"),
                 Err(e) => {
                     error!(error = %e, "failed to delete ServiceAccount during cleanup");
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
 
-            remove_finalizers::<ServiceAccountSync, _>(
+            // Remove only our finalizer; others (if any) stay in place.
+            remove_finalizer::<ServiceAccountSync, _>(
                 client.clone(),
                 Namespaced(&namespace),
-                &name,
+                &*cr,
+                FINALIZER,
             )
             .await?;
             info!(cr = %name, "finalizer removed — deletion complete");
@@ -90,10 +92,11 @@ impl Reconciler<ServiceAccountSync> for ServiceAccountSyncReconciler {
 
         // 2. Build and ensure the desired ServiceAccount.
         let target_ns = &cr.spec.target_namespace;
-        let sa_name = service_account_name(&name);
+        let sa_name = service_account_name(&namespace, &name);
         let desired_sa = build_service_account(
             &sa_name,
             target_ns,
+            &namespace,
             &name,
             cr.spec.automount_token,
             &cr.spec.image_pull_secrets,
@@ -136,7 +139,7 @@ impl Reconciler<ServiceAccountSync> for ServiceAccountSyncReconciler {
         gc_resources::<ServiceAccount, _>(
             client.clone(),
             Namespaced(target_ns),
-            MANAGED_LABEL,
+            &owner_selector(&namespace, &name),
             |sa| sa.name_any() == sa_name,
         )
         .await?;
@@ -188,6 +191,10 @@ impl Reconciler<ServiceAccountSync> for ServiceAccountSyncReconciler {
         Ok(Action::requeue(Duration::from_secs(300)))
     }
 
+    fn error_label(&self, err: &KubeGenericError) -> &'static str {
+        err.metric_label()
+    }
+
     fn error_policy(
         &self,
         cr: Arc<ServiceAccountSync>,
@@ -203,13 +210,24 @@ impl Reconciler<ServiceAccountSync> for ServiceAccountSyncReconciler {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn service_account_name(cr_name: &str) -> String {
-    format!("sas-{cr_name}")
+/// Child name; includes the CR namespace so equally-named CRs in different
+/// namespaces never write the same object.
+fn service_account_name(cr_namespace: &str, cr_name: &str) -> String {
+    format!("sas-{cr_namespace}-{cr_name}")
+}
+
+/// Label selector matching only the children of one CR. GC with a selector
+/// shared by all CRs would make every CR delete the others' children.
+fn owner_selector(cr_namespace: &str, cr_name: &str) -> String {
+    format!(
+        "{MANAGED_LABEL},multicontroller.example.io/owner={cr_name},multicontroller.example.io/owner-namespace={cr_namespace}"
+    )
 }
 
 fn build_service_account(
     name: &str,
     namespace: &str,
+    owner_ns: &str,
     owner_cr: &str,
     automount_token: bool,
     image_pull_secrets: &[String],
@@ -228,6 +246,7 @@ fn build_service_account(
                 "multicontroller-serviceaccountsync",
             )
             .label("multicontroller.example.io/owner", owner_cr)
+            .label("multicontroller.example.io/owner-namespace", owner_ns)
             .build(),
         automount_service_account_token: Some(automount_token),
         image_pull_secrets: if refs.is_empty() { None } else { Some(refs) },

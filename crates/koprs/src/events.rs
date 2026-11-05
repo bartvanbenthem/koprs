@@ -29,7 +29,7 @@ use k8s_openapi::api::core::v1::ObjectReference;
 use k8s_openapi::api::events::v1::Event;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
 use kube::{Api, Client};
-use tracing::info;
+use tracing::debug;
 
 use crate::error::Result;
 use crate::traits::KubeResource;
@@ -126,7 +126,7 @@ where
     let reason = reason.into();
     let type_str = event_type.as_str();
 
-    info!(
+    debug!(
         resource = %resource_name,
         %namespace,
         %reason,

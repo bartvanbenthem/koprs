@@ -145,17 +145,42 @@ On the first error the retry wait is `30 s × 2 = 60 s`. Each subsequent failure
 doubles it until it reaches the 5-minute cap. A successful poll resets the wait
 back to the base `30 s`.
 
+### Timeouts and size limits
+
+The default client applies a 30 s request timeout and a 10 s connect timeout,
+so an endpoint that accepts the connection but never answers cannot stall the
+watcher. Tune it with `.with_timeout(dur)`. Cap the response size with
+`.with_max_body_size(bytes)` — the limit is enforced while streaming, so an
+oversized response is cut off rather than buffered. For custom
+`ExternalSource`s, `WatchConfig::with_poll_timeout(dur)` bounds every poll.
+
+```rust
+use std::time::Duration;
+use koprs_external::http::HttpPoller;
+use koprs_external::watcher::WatchConfig;
+
+let poller = HttpPoller::new("https://config.example.com/settings")
+    .with_timeout(Duration::from_secs(10))
+    .with_max_body_size(1024 * 1024); // fits in a ConfigMap
+
+let config = WatchConfig::new(Duration::from_secs(30))
+    .with_poll_timeout(Duration::from_secs(20));
+```
+
 ### HTTP API — custom TLS (e.g. Kubernetes API server)
 
-Bring your own `reqwest::Client` for mutual TLS, custom CA certificates, or
-connection timeouts. This pattern works against the Kubernetes REST API when
+Bring your own `reqwest::Client` for mutual TLS, custom CA certificates, or a
+connection pool shared across pollers. The client is used as-is, so **set a
+timeout on it**. This pattern works against the Kubernetes REST API when
 combined with a bearer token:
 
 ```rust
+use std::time::Duration;
 use koprs_external::http::HttpPoller;
 
 let client = reqwest::Client::builder()
     .add_root_certificate(/* your cluster CA cert */)
+    .timeout(Duration::from_secs(30))
     .build()
     .unwrap();
 
