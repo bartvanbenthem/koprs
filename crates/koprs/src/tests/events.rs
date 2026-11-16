@@ -285,4 +285,70 @@ mod events_tests {
         .unwrap();
         server.await.unwrap();
     }
+
+    // -----------------------------------------------------------------------
+    // API limits
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn record_event_truncates_notes_the_api_would_reject() {
+        use crate::events::MAX_NOTE_BYTES;
+
+        let (client, mut handle) = mock_client();
+        let cm = configmap("my-cm", "my-ns");
+
+        let server = tokio::spawn(async move {
+            let (req, send) = handle.next_request().await.unwrap();
+            let body = read_body_json(req).await;
+            let note = body["note"].as_str().unwrap();
+            assert!(note.len() <= MAX_NOTE_BYTES, "note is {} bytes", note.len());
+            assert!(note.starts_with("failed: "));
+            send.send_response(json_response(event_response("my-ns")));
+        });
+
+        // Multi-byte characters straddle the limit; truncation must not split one.
+        let long_note = format!("failed: {}", "é".repeat(MAX_NOTE_BYTES));
+        record_event(
+            client,
+            &cm,
+            EventType::Warning,
+            "Sync",
+            "SyncFailed",
+            long_note,
+            "my-op",
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn truncate_to_bytes_keeps_short_text_and_respects_char_boundaries() {
+        use crate::events::truncate_to_bytes;
+
+        assert_eq!(truncate_to_bytes("short", 10), "short");
+        assert_eq!(truncate_to_bytes("exact", 5), "exact");
+        assert_eq!(truncate_to_bytes("abcdef", 3), "abc");
+        // "é" is two bytes: cutting at byte 3 would split the second one.
+        assert_eq!(truncate_to_bytes("ééé", 3), "é");
+        assert_eq!(truncate_to_bytes("ééé", 0), "");
+    }
+
+    #[test]
+    fn event_name_stays_a_valid_object_name_for_long_resource_names() {
+        use crate::events::{MAX_NAME_BYTES, event_name};
+
+        assert_eq!(event_name("my-cm", 0xabc), "my-cm.abc");
+
+        let long_name = "a".repeat(MAX_NAME_BYTES);
+        let name = event_name(&long_name, 1_700_000_000_000_000_000);
+        assert_eq!(name.len(), MAX_NAME_BYTES);
+        assert!(name.ends_with(&format!(".{:x}", 1_700_000_000_000_000_000_i128)));
+
+        // A cut that lands on a separator must not leave "-." in the name.
+        let dashed = format!("{}-{}", "a".repeat(235), "b".repeat(20));
+        let name = event_name(&dashed, 1_700_000_000_000_000_000);
+        assert!(name.len() <= MAX_NAME_BYTES);
+        assert!(!name.contains("-."), "invalid DNS label in {name}");
+    }
 }

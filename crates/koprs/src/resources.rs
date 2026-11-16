@@ -7,10 +7,18 @@ use kube::core::ObjectMeta;
 use kube::{Api, Client, ResourceExt};
 use tracing::{debug, info, warn};
 
-use crate::error::KubeGenericError;
 use crate::error::Result;
 use crate::scope::{ApiScope, ListScope};
-use crate::traits::KubeResource;
+use crate::traits::{KubeResource, required_name};
+
+/// Longest pause between retries in the `wait_for_*` polling helpers.
+const MAX_RETRY_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Pause after a failed API call: twice the polling interval, capped at
+/// [`MAX_RETRY_BACKOFF`]. Saturating, so a huge interval cannot overflow.
+fn error_backoff(interval: Duration) -> Duration {
+    interval.saturating_mul(2).min(MAX_RETRY_BACKOFF)
+}
 
 // ---------------------------------------------------------------------------
 // EnsureOutcome
@@ -84,15 +92,6 @@ pub async fn ensure_namespace(
 // Private core helpers
 // ---------------------------------------------------------------------------
 
-/// The object's `metadata.name`, or [`KubeGenericError::MissingMetadata`].
-fn required_name<T: KubeResource>(resource: &T) -> Result<&str> {
-    resource
-        .meta()
-        .name
-        .as_deref()
-        .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))
-}
-
 async fn apply_resource_inner<T>(api: Api<T>, resource: &T, field_manager: &str) -> Result<T>
 where
     T: KubeResource,
@@ -124,11 +123,72 @@ where
     }
 }
 
-async fn patch_metadata_inner<T>(api: Api<T>, name: &str, patch: serde_json::Value) -> Result<T>
+/// The `metadata` map a label / annotation helper edits.
+#[derive(Debug, Clone, Copy)]
+enum MetadataMap {
+    Labels,
+    Annotations,
+}
+
+impl MetadataMap {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Labels => "labels",
+            Self::Annotations => "annotations",
+        }
+    }
+}
+
+/// JSON merge patch that sets `entries` in one metadata map. A `null` value
+/// removes its key; keys that are not mentioned are left untouched.
+fn metadata_map_patch(
+    map: MetadataMap,
+    entries: impl IntoIterator<Item = (String, serde_json::Value)>,
+) -> serde_json::Value {
+    let entries: serde_json::Map<String, serde_json::Value> = entries.into_iter().collect();
+    serde_json::json!({ "metadata": { map.field(): entries } })
+}
+
+fn set_entries(pairs: &[(&str, &str)]) -> Vec<(String, serde_json::Value)> {
+    pairs
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.to_string(),
+                serde_json::Value::String(value.to_string()),
+            )
+        })
+        .collect()
+}
+
+fn remove_entries(keys: &[&str]) -> Vec<(String, serde_json::Value)> {
+    keys.iter()
+        .map(|key| (key.to_string(), serde_json::Value::Null))
+        .collect()
+}
+
+/// Merge-patch one metadata map of the named object.
+async fn patch_metadata_map<T, Scope>(
+    client: Client,
+    scope: Scope,
+    name: &str,
+    map: MetadataMap,
+    entries: Vec<(String, serde_json::Value)>,
+    action: &'static str,
+) -> Result<T>
 where
     T: KubeResource,
+    Scope: ApiScope<T>,
 {
-    Ok(api
+    let kind = T::kind(&());
+    let field = map.field();
+    match scope.namespace() {
+        Some(ns) => debug!(namespace = %ns, %kind, %name, field, "{action} metadata"),
+        None => debug!(%kind, %name, field, "{action} metadata"),
+    }
+    let patch = metadata_map_patch(map, entries);
+    Ok(scope
+        .into_api(client)
         .patch(name, &PatchParams::default(), &Patch::Merge(&patch))
         .await?)
 }
@@ -273,8 +333,8 @@ where
 
 /// Check whether a Kubernetes resource exists.
 ///
-/// Returns `Ok(true)` if the resource is found, `Ok(false)` on a 404.
-/// Does not fetch the full resource — use [`get_resource`] if you need the value.
+/// Returns `Ok(true)` if the resource is found, `Ok(false)` on a 404. The
+/// object is fetched and discarded — use [`get_resource`] if you need the value.
 ///
 /// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
@@ -509,12 +569,12 @@ where
                 tokio::time::sleep(interval).await;
             }
             Err(kube::Error::Api(e)) if e.code == 404 => {
-                let backoff = interval.min(Duration::from_secs(60));
+                let backoff = interval.min(MAX_RETRY_BACKOFF);
                 warn!(%kind, code = 404, ?backoff, "CRD not found, retrying");
                 tokio::time::sleep(backoff).await;
             }
             Err(e) => {
-                let backoff = (interval * 2).min(Duration::from_secs(60));
+                let backoff = error_backoff(interval);
                 warn!(%kind, error = %e, ?backoff, "API error, retrying");
                 tokio::time::sleep(backoff).await;
             }
@@ -586,7 +646,7 @@ where
                 tokio::time::sleep(interval).await;
             }
             Err(e) => {
-                let backoff = (interval * 2).min(Duration::from_secs(60));
+                let backoff = error_backoff(interval);
                 warn!(%kind, %name, error = %e, ?backoff, "API error, retrying");
                 tokio::time::sleep(backoff).await;
             }
@@ -634,17 +694,16 @@ where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
-    let kind = T::kind(&());
-    match scope.namespace() {
-        Some(ns) => debug!(namespace = %ns, %kind, %name, "Patching labels"),
-        None => debug!(%kind, %name, "Patching labels"),
-    }
-    let map: serde_json::Map<String, serde_json::Value> = labels
-        .iter()
-        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
-        .collect();
-    let patch = serde_json::json!({ "metadata": { "labels": map } });
-    patch_metadata_inner(scope.into_api(client), name, patch).await
+    let entries = set_entries(labels);
+    patch_metadata_map(
+        client,
+        scope,
+        name,
+        MetadataMap::Labels,
+        entries,
+        "Patching",
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -687,17 +746,16 @@ where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
-    let kind = T::kind(&());
-    match scope.namespace() {
-        Some(ns) => debug!(namespace = %ns, %kind, %name, "Patching annotations"),
-        None => debug!(%kind, %name, "Patching annotations"),
-    }
-    let map: serde_json::Map<String, serde_json::Value> = annotations
-        .iter()
-        .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
-        .collect();
-    let patch = serde_json::json!({ "metadata": { "annotations": map } });
-    patch_metadata_inner(scope.into_api(client), name, patch).await
+    let entries = set_entries(annotations);
+    patch_metadata_map(
+        client,
+        scope,
+        name,
+        MetadataMap::Annotations,
+        entries,
+        "Patching",
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -740,17 +798,16 @@ where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
-    let kind = T::kind(&());
-    match scope.namespace() {
-        Some(ns) => debug!(namespace = %ns, %kind, %name, "Removing labels"),
-        None => debug!(%kind, %name, "Removing labels"),
-    }
-    let map: serde_json::Map<String, serde_json::Value> = keys
-        .iter()
-        .map(|k| (k.to_string(), serde_json::Value::Null))
-        .collect();
-    let patch = serde_json::json!({ "metadata": { "labels": map } });
-    patch_metadata_inner(scope.into_api(client), name, patch).await
+    let entries = remove_entries(keys);
+    patch_metadata_map(
+        client,
+        scope,
+        name,
+        MetadataMap::Labels,
+        entries,
+        "Removing",
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -793,15 +850,14 @@ where
     T: KubeResource,
     Scope: ApiScope<T>,
 {
-    let kind = T::kind(&());
-    match scope.namespace() {
-        Some(ns) => debug!(namespace = %ns, %kind, %name, "Removing annotations"),
-        None => debug!(%kind, %name, "Removing annotations"),
-    }
-    let map: serde_json::Map<String, serde_json::Value> = keys
-        .iter()
-        .map(|k| (k.to_string(), serde_json::Value::Null))
-        .collect();
-    let patch = serde_json::json!({ "metadata": { "annotations": map } });
-    patch_metadata_inner(scope.into_api(client), name, patch).await
+    let entries = remove_entries(keys);
+    patch_metadata_map(
+        client,
+        scope,
+        name,
+        MetadataMap::Annotations,
+        entries,
+        "Removing",
+    )
+    .await
 }

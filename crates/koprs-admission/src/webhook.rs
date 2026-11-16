@@ -57,8 +57,11 @@
 //! # }
 //! ```
 
+use std::collections::HashSet;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -77,12 +80,13 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::{GracefulShutdown, Watcher};
 use rustls::ServerConfig;
 use serde::de::DeserializeOwned;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch::Receiver as ShutdownReceiver;
 use tokio_rustls::TlsAcceptor;
 use tower::ServiceExt;
 use tracing::{debug, info, warn};
 
-use crate::error::Result;
+use crate::error::{AdmissionError, Result};
 use crate::review::{
     AdmissionRequest, ValidationResponse, build_deny_response, build_response, parse_request,
     parse_uid,
@@ -183,6 +187,32 @@ where
 type BoxedHandler =
     Arc<dyn Fn(serde_json::Value) -> BoxFuture<'static, axum::response::Response> + Send + Sync>;
 
+/// One registered validator: the URL path it is served on and its handler.
+pub(crate) struct Route {
+    pub(crate) path: String,
+    pub(crate) handler: BoxedHandler,
+}
+
+/// Reject route sets the router would panic on, so a misconfigured builder
+/// makes [`WebhookBuilder::run`] return an error instead of crashing.
+pub(crate) fn check_routes(routes: &[Route]) -> Result<()> {
+    let mut seen_paths = HashSet::new();
+    for route in routes {
+        let path = route.path.as_str();
+        if !path.starts_with('/') {
+            return Err(AdmissionError::Internal(format!(
+                "webhook path '{path}' must start with '/'"
+            )));
+        }
+        if !seen_paths.insert(path) {
+            return Err(AdmissionError::Internal(format!(
+                "webhook path '{path}' is registered more than once"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Internal: core admission handler
 // ---------------------------------------------------------------------------
@@ -231,6 +261,24 @@ where
     }
 }
 
+/// Run one admission handler, answering HTTP 500 if it exceeds
+/// `request_timeout` so the webhook's `failurePolicy` decides the outcome.
+async fn admit_within(
+    request_timeout: Duration,
+    handler: BoxedHandler,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    match tokio::time::timeout(request_timeout, handler(body)).await {
+        Ok(response) => response,
+        Err(_elapsed) => {
+            warn!(timeout = ?request_timeout, "Admission request timed out");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal: health server (same pattern as koprs::controller)
 // ---------------------------------------------------------------------------
@@ -239,44 +287,74 @@ where
 ///
 /// `GET /healthz` — `200 OK` always (liveness).
 /// `GET /readyz`  — `200 OK` once `ready` flips to `true`, else `503`.
+///
+/// A failed `accept` (typically `EMFILE` or `ECONNABORTED`) is transient: it
+/// is logged and retried. Ending the loop instead would make the liveness
+/// probe fail and get a healthy pod restarted.
 pub(crate) async fn serve_health(listener: TcpListener, ready: Arc<AtomicBool>) {
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            break;
+        let stream = match listener.accept().await {
+            Ok((stream, _peer)) => stream,
+            Err(e) => {
+                warn!(error = %e, "Health server failed to accept a connection");
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                continue;
+            }
         };
-        let ready = ready.clone();
-        tokio::spawn(async move {
-            let io = TokioIo::new(stream);
-            let svc = service_fn(move |req: Request<Incoming>| {
-                let ready = ready.clone();
-                async move {
-                    let (status, body): (StatusCode, &'static str) =
-                        if req.uri().path() == "/readyz" {
-                            if ready.load(Ordering::Acquire) {
-                                (StatusCode::OK, "ok")
-                            } else {
-                                (StatusCode::SERVICE_UNAVAILABLE, "not ready")
-                            }
-                        } else {
-                            (StatusCode::OK, "ok")
-                        };
-                    Ok::<_, std::convert::Infallible>(
-                        Response::builder()
-                            .status(status)
-                            .header("content-type", "text/plain")
-                            .body(Full::new(Bytes::from_static(body.as_bytes())))
-                            .unwrap(),
-                    )
-                }
-            });
-            let _ = http1::Builder::new().serve_connection(io, svc).await;
-        });
+        tokio::spawn(serve_health_connection(stream, ready.clone()));
     }
+}
+
+async fn serve_health_connection(stream: TcpStream, ready: Arc<AtomicBool>) {
+    let service = service_fn(move |request: Request<Incoming>| {
+        let is_ready = ready.load(Ordering::Acquire);
+        async move { Ok::<_, std::convert::Infallible>(health_response(request.uri().path(), is_ready)) }
+    });
+    let _ = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT)
+        .serve_connection(TokioIo::new(stream), service)
+        .await;
+}
+
+/// The probe answer for `path`: only `/readyz` depends on readiness.
+fn health_response(path: &str, is_ready: bool) -> Response<Full<Bytes>> {
+    use hyper::header::{CONTENT_TYPE, HeaderValue};
+
+    let (status, body) = if path == "/readyz" && !is_ready {
+        (StatusCode::SERVICE_UNAVAILABLE, "not ready")
+    } else {
+        (StatusCode::OK, "ok")
+    };
+    let mut response = Response::new(Full::new(Bytes::from_static(body.as_bytes())));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    response
 }
 
 // ---------------------------------------------------------------------------
 // Internal: graceful shutdown signal
 // ---------------------------------------------------------------------------
+
+/// Resolves once the shutdown flag flips to `true`. Never resolves if the
+/// sender is dropped without signalling, so a closed channel can neither stop
+/// the server nor spin the accept loop.
+async fn wait_for_shutdown(mut shutdown: ShutdownReceiver<bool>) {
+    if shutdown.wait_for(|stop| *stop).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Wait for SIGTERM / Ctrl+C, then mark the pod not ready and tell the server
+/// to stop accepting connections.
+async fn announce_shutdown(shutdown_tx: tokio::sync::watch::Sender<bool>, ready: Arc<AtomicBool>) {
+    shutdown_signal().await;
+    info!("Shutdown signal received");
+    ready.store(false, Ordering::Release);
+    shutdown_tx.send(true).ok();
+}
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -315,6 +393,8 @@ pub(crate) const DRAIN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum accepted `AdmissionReview` body size. Objects may be up to ~1.5 MiB
 /// and UPDATE reviews carry both `object` and `oldObject`.
 pub(crate) const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Pause after a failed `accept` before trying again.
+pub(crate) const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 /// Builder for a validating admission webhook server.
 ///
@@ -390,7 +470,7 @@ pub struct WebhookBuilder {
     pub(crate) health_port: Option<u16>,
     pub(crate) graceful_shutdown: bool,
     pub(crate) request_timeout: Duration,
-    pub(crate) routes: Vec<(String, BoxedHandler)>,
+    pub(crate) routes: Vec<Route>,
 }
 
 impl Default for WebhookBuilder {
@@ -528,6 +608,8 @@ impl WebhookBuilder {
     ///
     /// Multiple validators can be registered at different paths by chaining
     /// calls to `.validate()`. Each call adds a route to the same server.
+    /// [`run`](Self::run) returns an error if a path does not start with `/`
+    /// or is registered twice.
     ///
     /// # Examples
     ///
@@ -565,29 +647,23 @@ impl WebhookBuilder {
             let v = validator.clone();
             Box::pin(async move { admit::<T, V>(&v, body).await })
         });
-        self.routes.push((path.into(), handler));
+        self.routes.push(Route {
+            path: path.into(),
+            handler,
+        });
         self
     }
 
     /// Build the axum router for the registered validators.
-    pub(crate) fn router(routes: Vec<(String, BoxedHandler)>, request_timeout: Duration) -> Router {
-        use axum::response::IntoResponse;
-
+    ///
+    /// Call [`check_routes`] first: axum panics on duplicate or malformed paths.
+    pub(crate) fn router(routes: Vec<Route>, request_timeout: Duration) -> Router {
         let mut router = Router::new();
-        for (path, handler) in routes {
+        for Route { path, handler } in routes {
             router = router.route(
                 &path,
                 routing::post(move |Json(body): Json<serde_json::Value>| {
-                    let handler = handler.clone();
-                    async move {
-                        match tokio::time::timeout(request_timeout, handler(body)).await {
-                            Ok(response) => response,
-                            Err(_) => {
-                                warn!(timeout = ?request_timeout, "Admission request timed out");
-                                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-                            }
-                        }
-                    }
+                    admit_within(request_timeout, handler.clone(), body)
                 }),
             );
         }
@@ -613,37 +689,31 @@ impl WebhookBuilder {
             routes,
         } = self;
 
+        check_routes(&routes)?;
         let router = Self::router(routes, request_timeout);
 
-        // --- Health server ---
         let ready = Arc::new(AtomicBool::new(false));
-        if let Some(hp) = health_port {
-            let listener = TcpListener::bind(("0.0.0.0", hp)).await?;
-            info!(port = hp, "Health server listening");
+        if let Some(health_port) = health_port {
+            let listener = TcpListener::bind(("0.0.0.0", health_port)).await?;
+            info!(port = health_port, "Health server listening");
             tokio::spawn(serve_health(listener, ready.clone()));
         }
 
-        // --- Shutdown signal ---
-        // `_shutdown_tx` lives until `run` returns, so the receiver never
-        // observes a closed channel when graceful shutdown is disabled.
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        if graceful_shutdown {
-            let tx = _shutdown_tx.clone();
-            let ready = ready.clone();
-            tokio::spawn(async move {
-                shutdown_signal().await;
-                info!("Shutdown signal received");
-                ready.store(false, Ordering::Release);
-                tx.send(true).ok();
-            });
-        }
-
-        // --- Bind webhook port ---
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;
         info!(port, tls = tls.is_some(), "Webhook server listening");
+        // Ready before the signal handler is installed, so a shutdown can
+        // never be overwritten by a late "ready".
         ready.store(true, Ordering::Release);
 
+        // `shutdown_tx` lives until `run` returns, so the receiver never
+        // observes a closed channel when graceful shutdown is disabled.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        if graceful_shutdown {
+            tokio::spawn(announce_shutdown(shutdown_tx.clone(), ready.clone()));
+        }
+
         serve(listener, tls.map(TlsAcceptor::from), router, shutdown_rx).await;
+        drop(shutdown_tx);
         Ok(())
     }
 }
@@ -653,48 +723,32 @@ pub(crate) async fn serve(
     listener: TcpListener,
     acceptor: Option<TlsAcceptor>,
     router: Router,
-    mut shutdown: tokio::sync::watch::Receiver<bool>,
+    shutdown: ShutdownReceiver<bool>,
 ) {
     let graceful = GracefulShutdown::new();
+    let mut shutdown_requested = pin!(wait_for_shutdown(shutdown));
 
     loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (stream, peer) = match accepted {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        // Typically EMFILE / ECONNABORTED: transient, keep serving.
-                        warn!(error = %e, "Failed to accept connection");
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        continue;
-                    }
-                };
-                let router = router.clone();
-                let acceptor = acceptor.clone();
-                let watcher = graceful.watcher();
-                tokio::spawn(async move {
-                    match acceptor {
-                        Some(acc) => {
-                            match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acc.accept(stream)).await {
-                                Ok(Ok(tls_stream)) => {
-                                    serve_connection(TokioIo::new(tls_stream), router, watcher).await;
-                                }
-                                Ok(Err(e)) => debug!(%peer, error = %e, "TLS handshake failed"),
-                                Err(_) => debug!(%peer, "TLS handshake timed out"),
-                            }
-                        }
-                        None => serve_connection(TokioIo::new(stream), router, watcher).await,
-                    }
-                });
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            () = &mut shutdown_requested => break,
+        };
+        let (stream, peer) = match accepted {
+            Ok(connection) => connection,
+            Err(e) => {
+                // Typically EMFILE / ECONNABORTED: transient, keep serving.
+                warn!(error = %e, "Failed to accept connection");
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                continue;
             }
-            // Map to `bool` so the watch read guard is not held across awaits
-            // (it is `!Send`).
-            stop = async { shutdown.wait_for(|stop| *stop).await.is_ok() } => {
-                if stop {
-                    break;
-                }
-            }
-        }
+        };
+        tokio::spawn(handle_connection(
+            stream,
+            peer,
+            acceptor.clone(),
+            router.clone(),
+            graceful.watcher(),
+        ));
     }
 
     drop(listener);
@@ -704,6 +758,24 @@ pub(crate) async fn serve(
         .is_err()
     {
         warn!(timeout = ?DRAIN_TIMEOUT, "Drain timed out; closing remaining connections");
+    }
+}
+
+/// Serve one accepted connection: TLS handshake first when configured.
+async fn handle_connection(
+    stream: TcpStream,
+    peer: SocketAddr,
+    acceptor: Option<TlsAcceptor>,
+    router: Router,
+    watcher: Watcher,
+) {
+    let Some(acceptor) = acceptor else {
+        return serve_connection(TokioIo::new(stream), router, watcher).await;
+    };
+    match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+        Ok(Ok(tls_stream)) => serve_connection(TokioIo::new(tls_stream), router, watcher).await,
+        Ok(Err(e)) => debug!(%peer, error = %e, "TLS handshake failed"),
+        Err(_elapsed) => debug!(%peer, "TLS handshake timed out"),
     }
 }
 

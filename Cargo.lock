@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "koprs"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "axum",
  "bytes",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "koprs-admission"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "axum",
  "bytes",
@@ -1317,7 +1317,6 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -1329,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "koprs-external"
-version = "0.12.5"
+version = "0.12.6"
 dependencies = [
  "axum",
  "bytes",
@@ -1835,16 +1834,16 @@ dependencies = [
 
 [[package]]
 name = "quinn-udp"
-version = "0.5.14"
+version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "addec6a0dcad8a8d96a771f815f0eaf55f9d1805756410b39f5fa81332574cbd"
+checksum = "af66907df18639dcf4db56ca65490cabc4b27a97dbadd96f2926cca73298f016"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2058,15 +2057,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]

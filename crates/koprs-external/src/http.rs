@@ -8,6 +8,9 @@
 //! - The **first** successful response produces [`ExternalEvent::Added`].
 //! - A subsequent response with a different body (no `ETag` match) produces
 //!   [`ExternalEvent::Modified`].
+//! - A subsequent `200` whose body is byte-for-byte the same as the previous
+//!   one produces no event, so endpoints without `ETag` / `Last-Modified`
+//!   support do not report a change on every poll.
 //! - A `404 Not Found` after a prior success produces
 //!   [`ExternalEvent::Removed`].
 //! - `304 Not Modified` produces no event.
@@ -153,6 +156,10 @@ pub struct HttpPoller {
     last_etag: Option<String>,
     last_modified_value: Option<String>,
     seen: bool,
+    /// Body of the last successful response, for change detection against
+    /// servers that answer `200` without validators. `Bytes` is reference
+    /// counted, so this shares the allocation handed out in the event.
+    last_body: Option<Bytes>,
     max_body_bytes: Option<usize>,
 }
 
@@ -174,6 +181,7 @@ impl HttpPoller {
             last_etag: None,
             last_modified_value: None,
             seen: false,
+            last_body: None,
             max_body_bytes: None,
         }
     }
@@ -229,6 +237,122 @@ impl HttpPoller {
     }
 }
 
+/// A response header as text, if present and valid UTF-8.
+fn header_text(response: &reqwest::Response, name: HeaderName) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(String::from)
+}
+
+impl HttpPoller {
+    /// The conditional GET for this poll, with the configured headers.
+    fn build_request(&self) -> Result<reqwest::RequestBuilder> {
+        let mut request = self.client.get(&self.url);
+
+        // Conditional GET to avoid re-processing unchanged responses.
+        // Prefer ETag over Last-Modified when both are available.
+        if let Some(etag) = &self.last_etag {
+            request = request.header(IF_NONE_MATCH, etag.as_str());
+        } else if let Some(last_modified) = &self.last_modified_value {
+            request = request.header(IF_MODIFIED_SINCE, last_modified.as_str());
+        }
+
+        for (key, value) in &self.extra_headers {
+            let name: HeaderName =
+                key.parse()
+                    .map_err(|e: reqwest::header::InvalidHeaderName| {
+                        ExternalError::Internal(e.to_string())
+                    })?;
+            let mut value: HeaderValue =
+                value
+                    .parse()
+                    .map_err(|e: reqwest::header::InvalidHeaderValue| {
+                        ExternalError::Internal(e.to_string())
+                    })?;
+            // Keep credentials out of `Debug` output and request logs.
+            if name == AUTHORIZATION {
+                value.set_sensitive(true);
+            }
+            request = request.header(name, value);
+        }
+        Ok(request)
+    }
+
+    /// `404`: report the removal once, then forget everything about the resource.
+    fn on_not_found(&mut self) -> Vec<ExternalEvent<HttpResponse>> {
+        if !self.seen {
+            return vec![];
+        }
+        debug!(url = %self.url, "Resource removed (404)");
+        self.seen = false;
+        self.last_etag = None;
+        self.last_modified_value = None;
+        self.last_body = None;
+        vec![ExternalEvent::Removed(HttpResponse {
+            body: Bytes::new(),
+            url: self.url.clone(),
+            status: StatusCode::NOT_FOUND.as_u16(),
+            etag: None,
+            last_modified: None,
+            content_type: None,
+        })]
+    }
+
+    /// `2xx`: read the body and report it as added, modified or unchanged.
+    async fn on_success(
+        &mut self,
+        response: reqwest::Response,
+    ) -> Result<Vec<ExternalEvent<HttpResponse>>> {
+        let etag = header_text(&response, ETAG);
+        let last_modified = header_text(&response, LAST_MODIFIED);
+        let content_type = header_text(&response, CONTENT_TYPE);
+        let status = response.status().as_u16();
+        // State is only advanced after the body was read in full, so a
+        // truncated or oversized response is retried from the old state.
+        let body = read_body(response, self.max_body_bytes, &self.url).await?;
+
+        let is_unchanged = self.seen && self.last_body.as_ref() == Some(&body);
+        self.last_etag = etag.clone();
+        self.last_modified_value = last_modified.clone();
+        if is_unchanged {
+            debug!(url = %self.url, "Body unchanged since the previous poll");
+            return Ok(vec![]);
+        }
+        self.last_body = Some(body.clone());
+
+        let http_response = HttpResponse {
+            body,
+            url: self.url.clone(),
+            status,
+            etag,
+            last_modified,
+            content_type,
+        };
+        if self.seen {
+            return Ok(vec![ExternalEvent::Modified(http_response)]);
+        }
+        self.seen = true;
+        Ok(vec![ExternalEvent::Added(http_response)])
+    }
+
+    async fn poll_once(&mut self) -> Result<Vec<ExternalEvent<HttpResponse>>> {
+        let response = self.build_request()?.send().await?;
+        match response.status() {
+            StatusCode::NOT_MODIFIED => {
+                debug!(url = %self.url, "Not modified (304)");
+                Ok(vec![])
+            }
+            StatusCode::NOT_FOUND => Ok(self.on_not_found()),
+            status if status.is_success() => self.on_success(response).await,
+            status => Err(ExternalError::Internal(format!(
+                "Unexpected HTTP status: {status}"
+            ))),
+        }
+    }
+}
+
 impl ExternalSource for HttpPoller {
     type Item = HttpResponse;
 
@@ -237,105 +361,6 @@ impl ExternalSource for HttpPoller {
     }
 
     fn poll(&mut self) -> BoxFuture<'_, Result<Vec<ExternalEvent<HttpResponse>>>> {
-        let this = self;
-        Box::pin(async move {
-            let mut req = this.client.get(&this.url);
-
-            // Conditional GET to avoid re-processing unchanged responses.
-            // Prefer ETag over Last-Modified when both are available.
-            if let Some(etag) = &this.last_etag {
-                req = req.header(IF_NONE_MATCH, etag.as_str());
-            } else if let Some(lm) = &this.last_modified_value {
-                req = req.header(IF_MODIFIED_SINCE, lm.as_str());
-            }
-
-            for (key, value) in &this.extra_headers {
-                let name: HeaderName =
-                    key.parse()
-                        .map_err(|e: reqwest::header::InvalidHeaderName| {
-                            ExternalError::Internal(e.to_string())
-                        })?;
-                let val: HeaderValue =
-                    value
-                        .parse()
-                        .map_err(|e: reqwest::header::InvalidHeaderValue| {
-                            ExternalError::Internal(e.to_string())
-                        })?;
-                req = req.header(name, val);
-            }
-
-            let response = req.send().await?;
-
-            match response.status() {
-                StatusCode::NOT_MODIFIED => {
-                    debug!(url = %this.url, "Not modified (304)");
-                    Ok(vec![])
-                }
-
-                StatusCode::NOT_FOUND => {
-                    if this.seen {
-                        debug!(url = %this.url, "Resource removed (404)");
-                        this.seen = false;
-                        this.last_etag = None;
-                        this.last_modified_value = None;
-                        Ok(vec![ExternalEvent::Removed(HttpResponse {
-                            body: Bytes::new(),
-                            url: this.url.clone(),
-                            status: 404,
-                            etag: None,
-                            last_modified: None,
-                            content_type: None,
-                        })])
-                    } else {
-                        Ok(vec![])
-                    }
-                }
-
-                s if s.is_success() => {
-                    let etag = response
-                        .headers()
-                        .get(ETAG)
-                        .and_then(|v| v.to_str().ok())
-                        .map(String::from);
-                    let last_modified = response
-                        .headers()
-                        .get(LAST_MODIFIED)
-                        .and_then(|v| v.to_str().ok())
-                        .map(String::from);
-                    let content_type = response
-                        .headers()
-                        .get(CONTENT_TYPE)
-                        .and_then(|v| v.to_str().ok())
-                        .map(String::from);
-                    let status = response.status().as_u16();
-                    let body = read_body(response, this.max_body_bytes, &this.url).await?;
-
-                    let http_response = HttpResponse {
-                        body,
-                        url: this.url.clone(),
-                        status,
-                        etag: etag.clone(),
-                        last_modified: last_modified.clone(),
-                        content_type,
-                    };
-
-                    let event = if this.seen {
-                        ExternalEvent::Modified(http_response)
-                    } else {
-                        this.seen = true;
-                        ExternalEvent::Added(http_response)
-                    };
-
-                    this.last_etag = etag;
-                    this.last_modified_value = last_modified;
-
-                    Ok(vec![event])
-                }
-
-                s => Err(ExternalError::Internal(format!(
-                    "Unexpected HTTP status: {s}"
-                ))),
-            }
-        })
+        Box::pin(self.poll_once())
     }
 }

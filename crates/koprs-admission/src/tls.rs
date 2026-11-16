@@ -38,9 +38,9 @@ pub(crate) fn certified_key_from_pem(
     key_pem: &[u8],
     provider: &CryptoProvider,
 ) -> Result<CertifiedKey> {
-    use rustls_pemfile::{certs, private_key};
+    use rustls::pki_types::pem::{self, PemObject};
 
-    let certs: Vec<CertificateDer<'static>> = certs(&mut &cert_pem[..])
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| AdmissionError::Tls(e.to_string()))?;
     if certs.is_empty() {
@@ -48,9 +48,13 @@ pub(crate) fn certified_key_from_pem(
             "no certificates found in PEM data".into(),
         ));
     }
-    let key: PrivateKeyDer<'static> = private_key(&mut &key_pem[..])
-        .map_err(|e| AdmissionError::Tls(e.to_string()))?
-        .ok_or_else(|| AdmissionError::Tls("no private key found in PEM data".into()))?;
+    let key: PrivateKeyDer<'static> =
+        PrivateKeyDer::from_pem_slice(key_pem).map_err(|e| match e {
+            pem::Error::NoItemsFound => {
+                AdmissionError::Tls("no private key found in PEM data".into())
+            }
+            e => AdmissionError::Tls(e.to_string()),
+        })?;
 
     CertifiedKey::from_der(certs, key, provider).map_err(|e| AdmissionError::Tls(e.to_string()))
 }

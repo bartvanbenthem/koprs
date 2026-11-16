@@ -34,6 +34,36 @@ use tracing::debug;
 use crate::error::Result;
 use crate::traits::KubeResource;
 
+/// Longest `note` the `events.k8s.io/v1` API accepts, in bytes. Longer notes
+/// are rejected with HTTP 422.
+pub(crate) const MAX_NOTE_BYTES: usize = 1024;
+
+/// Longest object name the API accepts (a DNS subdomain), in bytes.
+pub(crate) const MAX_NAME_BYTES: usize = 253;
+
+/// Cut `text` to at most `max_bytes`, never splitting a character.
+pub(crate) fn truncate_to_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// A unique Event name of the form `<resource>.<hex nanoseconds>`.
+///
+/// The resource part is shortened when needed so the result stays a valid
+/// object name even for resources whose own name is already at the limit.
+pub(crate) fn event_name(resource_name: &str, unix_nanos: i128) -> String {
+    let suffix = format!(".{unix_nanos:x}");
+    let prefix = truncate_to_bytes(resource_name, MAX_NAME_BYTES.saturating_sub(suffix.len()))
+        .trim_end_matches(|last: char| !last.is_ascii_alphanumeric());
+    format!("{prefix}{suffix}")
+}
+
 // ---------------------------------------------------------------------------
 // EventType
 // ---------------------------------------------------------------------------
@@ -69,6 +99,10 @@ impl EventType {
 ///
 /// The event is created in the same namespace as `resource`, or `default` for
 /// cluster-scoped resources.
+///
+/// A `note` longer than 1024 bytes is truncated, because the API rejects
+/// longer notes; this keeps a long error message from failing the reconcile
+/// that tried to report it.
 ///
 /// | Parameter | Kubernetes field | Guidance |
 /// |---|---|---|
@@ -116,7 +150,7 @@ where
     let namespace = meta.namespace.as_deref().unwrap_or("default");
 
     let now = k8s_openapi::jiff::Timestamp::now();
-    let event_name = format!("{}.{:x}", resource_name, now.as_nanosecond() as u64);
+    let event_name = event_name(resource_name, now.as_nanosecond());
 
     let reporting_instance = std::env::var("POD_NAME")
         .or_else(|_| std::env::var("HOSTNAME"))
@@ -124,6 +158,8 @@ where
 
     let action = action.into();
     let reason = reason.into();
+    let note = note.into();
+    let note = truncate_to_bytes(&note, MAX_NOTE_BYTES).to_string();
     let type_str = event_type.as_str();
 
     debug!(
@@ -154,7 +190,7 @@ where
         regarding: Some(regarding),
         action: Some(action),
         reason: Some(reason),
-        note: Some(note.into()),
+        note: Some(note),
         type_: Some(type_str.to_string()),
         reporting_controller: Some(reporting_controller.into()),
         reporting_instance: Some(reporting_instance),

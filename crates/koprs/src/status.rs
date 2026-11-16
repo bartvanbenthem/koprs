@@ -8,6 +8,8 @@ use serde_json::json;
 use tracing::debug;
 
 use crate::error::Result;
+use crate::scope::{ApiScope, Cluster, Namespaced};
+use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
 /// Truncates (does not round) to whole-second precision, matching the RFC
 /// 3339 `SecondsFormat::Secs` behavior this type previously relied on.
@@ -17,8 +19,6 @@ fn truncate_to_secs(ts: Timestamp) -> Timestamp {
         .mode(RoundMode::Trunc);
     ts.round(round).unwrap_or(ts)
 }
-use crate::scope::{ApiScope, Cluster, Namespaced};
-use crate::traits::{ClusterResource, KubeResource, NamespacedResource};
 
 // ---------------------------------------------------------------------------
 // KoprsCondition
@@ -107,7 +107,6 @@ where
     K::DynamicType: Default,
     S: Serialize,
 {
-    K::DynamicType::default();
     let patch = json!({
         "apiVersion": K::api_version(&()),
         "kind": K::kind(&()),
@@ -170,10 +169,8 @@ where
     S: Serialize,
     Scope: ApiScope<K>,
 {
-    K::DynamicType::default();
     let kind = K::kind(&());
 
-    // Read the namespace out safely before consuming the scope
     match scope.namespace() {
         Some(ns) => debug!(namespace = %ns, %kind, %name, "Patching status"),
         None => debug!(%kind, %name, "Patching status"),

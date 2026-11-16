@@ -243,75 +243,41 @@ pub(crate) fn parse_request<T: DeserializeOwned>(body: &Value) -> Result<Admissi
         AdmissionError::Internal("AdmissionReview missing 'request' field".into())
     })?;
 
-    let uid = request
-        .get("uid")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let name = request
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let namespace = request
-        .get("namespace")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-
-    let operation = request
-        .get("operation")
-        .and_then(|v| v.as_str())
-        .map(Operation::from_str)
-        .unwrap_or(Operation::Unknown("".into()));
-
-    let object = request
-        .get("object")
-        .filter(|v| !v.is_null())
-        .map(|v| serde_json::from_value::<T>(v.clone()))
-        .transpose()
-        .map_err(AdmissionError::Serialization)?;
-
-    let old_object = request
-        .get("oldObject")
-        .filter(|v| !v.is_null())
-        .map(|v| serde_json::from_value::<T>(v.clone()))
-        .transpose()
-        .map_err(AdmissionError::Serialization)?;
-
-    let dry_run = request
-        .get("dryRun")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let string_field = |key: &str| {
-        request
-            .get(key)
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
+    let text_field = |key: &str| request.get(key).and_then(Value::as_str);
+    let non_empty_text_field = |key: &str| {
+        text_field(key)
+            .filter(|text| !text.is_empty())
             .map(String::from)
     };
 
+    let operation = text_field("operation")
+        .map(Operation::from_str)
+        .unwrap_or(Operation::Unknown(String::new()));
+    let dry_run = request
+        .get("dryRun")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
     Ok(AdmissionRequest {
-        uid,
+        uid: text_field("uid").unwrap_or_default().to_string(),
         kind: optional_field(request, "kind")?.unwrap_or_default(),
         resource: optional_field(request, "resource")?.unwrap_or_default(),
-        sub_resource: string_field("subResource"),
+        sub_resource: non_empty_text_field("subResource"),
         request_kind: optional_field(request, "requestKind")?,
         request_resource: optional_field(request, "requestResource")?,
-        request_sub_resource: string_field("requestSubResource"),
+        request_sub_resource: non_empty_text_field("requestSubResource"),
         user_info: optional_field(request, "userInfo")?.unwrap_or_default(),
-        name,
-        namespace,
+        name: text_field("name").unwrap_or_default().to_string(),
+        namespace: text_field("namespace").map(String::from),
         operation,
-        object,
-        old_object,
+        object: optional_field(request, "object")?,
+        old_object: optional_field(request, "oldObject")?,
         dry_run,
     })
 }
 
-/// Deserialize an optional, possibly-null object field.
+/// Deserialize an optional, possibly-null object field straight from the
+/// parsed review, without copying it first (objects can be megabytes).
 fn optional_field<F: DeserializeOwned>(request: &Value, key: &str) -> Result<Option<F>> {
     request
         .get(key)

@@ -1,10 +1,12 @@
-use futures::TryStreamExt;
-use kube::{Api, Client, ResourceExt};
+use std::pin::pin;
+
+use futures::{Stream, StreamExt};
+use kube::{Client, ResourceExt};
 use kube_runtime::WatchStreamExt;
-use kube_runtime::watcher::{Config, watcher};
+use kube_runtime::watcher::{Config, Event, watcher};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{debug, info, warn};
 
 use crate::error::Result;
 use crate::scope::ListScope;
@@ -32,36 +34,101 @@ pub enum WatchEvent<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Private core helper
+// Private core helpers
 // ---------------------------------------------------------------------------
 
-/// Shared task body for signal-only (`()`) and resource-data (`T`) watchers.
-async fn spawn_watcher<T>(
-    api: Api<T>,
-    config: Config,
-    tx: mpsc::Sender<()>,
-) -> Result<JoinHandle<()>>
-where
-    T: KubeResource,
-{
-    let handle = tokio::task::spawn(async move {
-        let result = watcher(api, config)
-            .applied_objects()
-            .default_backoff()
-            .try_for_each(|resource: T| {
-                let tx = tx.clone();
-                async move {
-                    debug!(name = %resource.name_any(), "Resource applied");
-                    tx.send(()).await.ok();
-                    Ok(())
-                }
-            })
-            .await;
-        if let Err(e) = result {
-            error!(error = %e, "Resource watcher failed");
+/// Watcher configuration for an optional label selector.
+fn watcher_config(label_selector: Option<&str>) -> Config {
+    match label_selector {
+        Some(selector) => Config::default().labels(selector),
+        None => Config::default(),
+    }
+}
+
+fn log_start<T: KubeResource>(watcher_kind: &'static str, label_selector: Option<&str>) {
+    let kind = T::kind(&());
+    match label_selector {
+        Some(selector) => {
+            info!(%kind, label_selector = %selector, watcher = watcher_kind, "Starting watcher")
         }
-    });
-    Ok(handle)
+        None => info!(%kind, watcher = watcher_kind, "Starting watcher"),
+    }
+}
+
+/// Forward the items of a watch stream to `tx` until the receiver is dropped.
+///
+/// `to_message` turns a stream item into the message to send, or `None` to
+/// skip it.
+///
+/// A watch error does **not** end the task. kube's watcher recovers on the
+/// next poll and `default_backoff` spaces the retries, so a transient API
+/// failure (dropped connection, expired resource version, API server restart)
+/// must not silently stop the caller's event feed. The task ends only when
+/// every receiver is gone, which is checked while waiting for events too, so
+/// an idle watch does not outlive its consumer.
+async fn forward_watch<Item, Message, Watch>(
+    watch_stream: Watch,
+    tx: mpsc::Sender<Message>,
+    to_message: fn(Item) -> Option<Message>,
+) where
+    Watch: Stream<Item = std::result::Result<Item, kube_runtime::watcher::Error>>,
+{
+    let mut watch_stream = pin!(watch_stream);
+    loop {
+        let next = tokio::select! {
+            () = tx.closed() => break,
+            next = watch_stream.next() => next,
+        };
+        match next {
+            Some(Ok(item)) => {
+                let Some(message) = to_message(item) else {
+                    continue;
+                };
+                if tx.send(message).await.is_err() {
+                    break;
+                }
+            }
+            Some(Err(e)) => warn!(error = %e, "Watch failed, retrying with backoff"),
+            None => {
+                debug!("Watch stream ended");
+                return;
+            }
+        }
+    }
+    debug!("Receiver dropped, stopping watcher");
+}
+
+fn applied_signal<T: KubeResource>(resource: T) -> Option<()> {
+    debug!(name = %resource.name_any(), "Resource applied");
+    Some(())
+}
+
+fn applied_object<T: KubeResource>(resource: T) -> Option<T> {
+    debug!(name = %resource.name_any(), "Resource applied, sending object");
+    Some(resource)
+}
+
+/// Map a raw watcher event to a [`WatchEvent`], skipping bookmarks.
+fn to_watch_event<T: KubeResource>(event: Event<T>) -> Option<WatchEvent<T>> {
+    match event {
+        Event::Apply(resource) => {
+            debug!(name = %resource.name_any(), "Resource applied");
+            Some(WatchEvent::Applied(resource))
+        }
+        Event::Delete(resource) => {
+            debug!(name = %resource.name_any(), "Resource deleted");
+            Some(WatchEvent::Deleted(resource))
+        }
+        // During a watch restart, existing objects arrive as InitApply
+        // events. Treat them as Applied so callers can reconcile current
+        // state.
+        Event::InitApply(resource) => {
+            debug!(name = %resource.name_any(), "Resource observed (init)");
+            Some(WatchEvent::Applied(resource))
+        }
+        // Init and InitDone are bookmarks with no resource data.
+        Event::Init | Event::InitDone => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -77,8 +144,9 @@ where
 /// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument to select the
 /// correct API surface at compile time.
 ///
-/// Returns a [`JoinHandle`] for the background task. The task shuts down
-/// automatically when all receivers are dropped.
+/// Returns a [`JoinHandle`] for the background task. Watch errors are logged
+/// and retried with backoff; the task shuts down only when all receivers are
+/// dropped (or the handle is aborted).
 ///
 /// Use [`watch_objects`] when you need the resource data on each event, or
 /// [`watch_events`] when you also need to react to deletions.
@@ -113,18 +181,15 @@ where
     T: KubeResource,
     Scope: ListScope<T>,
 {
-    let kind = T::kind(&());
-    match label_selector {
-        Some(sel) => info!(%kind, label_selector = %sel, "Starting signal watcher"),
-        None => info!(%kind, "Starting signal watcher"),
-    }
-
-    let config = match label_selector {
-        Some(sel) => Config::default().labels(sel),
-        None => Config::default(),
-    };
-
-    spawn_watcher(scope.into_api(client), config, tx).await
+    log_start::<T>("signal", label_selector);
+    let watch_stream = watcher(scope.into_api(client), watcher_config(label_selector))
+        .applied_objects()
+        .default_backoff();
+    Ok(tokio::spawn(forward_watch(
+        watch_stream,
+        tx,
+        applied_signal::<T>,
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +208,9 @@ where
 ///
 /// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
-/// Returns a [`JoinHandle`] for the background task. The task shuts down
-/// automatically when all receivers are dropped.
+/// Returns a [`JoinHandle`] for the background task. Watch errors are logged
+/// and retried with backoff; the task shuts down only when all receivers are
+/// dropped (or the handle is aborted).
 ///
 /// # Examples
 ///
@@ -176,36 +242,15 @@ where
     T: KubeResource,
     Scope: ListScope<T>,
 {
-    let kind = T::kind(&());
-    match label_selector {
-        Some(sel) => info!(%kind, label_selector = %sel, "Starting object watcher"),
-        None => info!(%kind, "Starting object watcher"),
-    }
-
-    let config = match label_selector {
-        Some(sel) => Config::default().labels(sel),
-        None => Config::default(),
-    };
-
-    let api = scope.into_api(client);
-    let handle = tokio::task::spawn(async move {
-        let result = watcher(api, config)
-            .applied_objects()
-            .default_backoff()
-            .try_for_each(|resource: T| {
-                let tx = tx.clone();
-                async move {
-                    debug!(name = %resource.name_any(), "Resource applied — sending object");
-                    tx.send(resource).await.ok();
-                    Ok(())
-                }
-            })
-            .await;
-        if let Err(e) = result {
-            error!(error = %e, "Object watcher failed");
-        }
-    });
-    Ok(handle)
+    log_start::<T>("object", label_selector);
+    let watch_stream = watcher(scope.into_api(client), watcher_config(label_selector))
+        .applied_objects()
+        .default_backoff();
+    Ok(tokio::spawn(forward_watch(
+        watch_stream,
+        tx,
+        applied_object::<T>,
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -225,8 +270,9 @@ where
 ///
 /// Pass [`Cluster`][crate::scope::Cluster] or [`Namespaced`][crate::scope::Namespaced] as the `scope` argument.
 ///
-/// Returns a [`JoinHandle`] for the background task. The task shuts down
-/// automatically when all receivers are dropped.
+/// Returns a [`JoinHandle`] for the background task. Watch errors are logged
+/// and retried with backoff; the task shuts down only when all receivers are
+/// dropped (or the handle is aborted).
 ///
 /// > **Note:** Delete events may be lost if the watcher was unavailable during
 /// > the deletion window. For reliable deletion guarantees, use finalizers.
@@ -265,55 +311,12 @@ where
     T: KubeResource,
     Scope: ListScope<T>,
 {
-    let kind = T::kind(&());
-    match label_selector {
-        Some(sel) => info!(%kind, label_selector = %sel, "Starting event watcher"),
-        None => info!(%kind, "Starting event watcher"),
-    }
-
-    let config = match label_selector {
-        Some(sel) => Config::default().labels(sel),
-        None => Config::default(),
-    };
-
-    let api = scope.into_api(client);
-    let handle = tokio::task::spawn(async move {
-        let result = watcher(api, config)
-            .default_backoff()
-            .try_for_each(|event| {
-                let tx = tx.clone();
-                async move {
-                    let msg = match event {
-                        kube_runtime::watcher::Event::Apply(r) => {
-                            debug!(name = %r.name_any(), "Resource applied");
-                            Some(WatchEvent::Applied(r))
-                        }
-                        kube_runtime::watcher::Event::Delete(r) => {
-                            debug!(name = %r.name_any(), "Resource deleted");
-                            Some(WatchEvent::Deleted(r))
-                        }
-                        // During a watch restart, existing objects arrive as
-                        // InitApply events. Treat them as Applied so callers
-                        // can reconcile current state.
-                        kube_runtime::watcher::Event::InitApply(r) => {
-                            debug!(name = %r.name_any(), "Resource observed (init)");
-                            Some(WatchEvent::Applied(r))
-                        }
-                        // Init and InitDone are bookmarks with no resource
-                        // data — safe to skip.
-                        kube_runtime::watcher::Event::Init
-                        | kube_runtime::watcher::Event::InitDone => None,
-                    };
-                    if let Some(msg) = msg {
-                        tx.send(msg).await.ok();
-                    }
-                    Ok(())
-                }
-            })
-            .await;
-        if let Err(e) = result {
-            error!(error = %e, "Event watcher failed");
-        }
-    });
-    Ok(handle)
+    log_start::<T>("event", label_selector);
+    let watch_stream =
+        watcher(scope.into_api(client), watcher_config(label_selector)).default_backoff();
+    Ok(tokio::spawn(forward_watch(
+        watch_stream,
+        tx,
+        to_watch_event::<T>,
+    )))
 }

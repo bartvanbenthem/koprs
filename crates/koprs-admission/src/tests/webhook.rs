@@ -212,7 +212,7 @@ mod webhook_tests {
     fn builder_validate_adds_route() {
         let b = WebhookBuilder::new().validate("/validate/test", AlwaysAllow);
         assert_eq!(b.routes.len(), 1);
-        assert_eq!(b.routes[0].0, "/validate/test");
+        assert_eq!(b.routes[0].path, "/validate/test");
     }
 
     #[test]
@@ -526,5 +526,75 @@ mod webhook_tests {
         fn assert_send<T: Send>(_: &T) {}
         let fut = WebhookBuilder::new().validate("/v", AlwaysAllow).run();
         assert_send(&fut);
+    }
+
+    // -----------------------------------------------------------------------
+    // Route validation — misconfiguration is an error, not a panic
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_rejects_a_path_registered_twice() {
+        let result = WebhookBuilder::new()
+            .validate("/validate/test", AlwaysAllow)
+            .validate("/validate/test", AlwaysDeny)
+            .run()
+            .await;
+        let message = result
+            .expect_err("duplicate path must be rejected")
+            .to_string();
+        assert!(message.contains("registered more than once"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn run_rejects_a_path_without_leading_slash() {
+        let result = WebhookBuilder::new()
+            .validate("validate/test", AlwaysAllow)
+            .run()
+            .await;
+        let message = result
+            .expect_err("relative path must be rejected")
+            .to_string();
+        assert!(message.contains("must start with '/'"), "{message}");
+    }
+
+    // -----------------------------------------------------------------------
+    // serve — a dropped shutdown sender neither stops nor stalls the server
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_keeps_answering_when_the_shutdown_sender_is_dropped() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let router = builder_router(WebhookBuilder::new().validate("/v", AlwaysAllow));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        drop(tx);
+        let server = tokio::spawn(crate::webhook::serve(listener, None, router, rx));
+
+        let body = serde_json::to_vec(&make_review("CREATE", 1, "x")).unwrap();
+        let exchange = async {
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let head = format!(
+                "POST /v HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            String::from_utf8_lossy(&response).into_owned()
+        };
+        let response = tokio::time::timeout(Duration::from_secs(5), exchange)
+            .await
+            .expect("server stalled after the shutdown sender was dropped");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(
+            !server.is_finished(),
+            "server stopped without a shutdown signal"
+        );
+        server.abort();
     }
 }
