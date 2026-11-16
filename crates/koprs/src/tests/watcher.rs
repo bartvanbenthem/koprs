@@ -854,4 +854,84 @@ mod watcher_tests {
             .expect("watcher task did not shut down within timeout")
             .expect("watcher task panicked");
     }
+
+    // -----------------------------------------------------------------------
+    // Resilience — a watch error must not end the watcher
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn watcher_keeps_running_after_an_api_error() {
+        let (client, mut handle) = mock_client();
+        let (tx, mut rx) = mpsc::channel(16);
+
+        tokio::spawn(async move {
+            // First LIST fails: the watcher must back off and retry.
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(
+                Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "reason": "InternalError", "code": 500
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            );
+
+            // Retried LIST succeeds and carries one object.
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(list_response(
+                "ConfigMapList",
+                vec![configmap_json("cm1", "ns1")],
+            ));
+
+            // Keep the connection open so no further error is produced.
+            let _watch_request = handle.next_request().await;
+            std::future::pending::<()>().await;
+        });
+
+        watch::<ConfigMap, _>(client, Namespaced("ns1"), None, tx)
+            .await
+            .unwrap();
+
+        timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("watcher did not recover from the API error")
+            .expect("watcher task ended after the API error");
+    }
+
+    // -----------------------------------------------------------------------
+    // Shutdown — an idle watcher stops when the receiver is dropped
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn idle_watcher_shuts_down_when_receiver_is_dropped() {
+        let (client, mut handle) = mock_client();
+        let (tx, rx) = mpsc::channel::<()>(16);
+
+        tokio::spawn(async move {
+            let (_req, send) = handle.next_request().await.unwrap();
+            send.send_response(list_response("ConfigMapList", vec![]));
+
+            // WATCH stays open and silent: no event will ever wake the task.
+            let _watch_request = handle.next_request().await;
+            std::future::pending::<()>().await;
+        });
+
+        let task = watch::<ConfigMap, _>(client, Namespaced("ns1"), None, tx)
+            .await
+            .unwrap();
+
+        // Let the watcher reach the silent WATCH before dropping the receiver.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(rx);
+
+        timeout(Duration::from_secs(2), task)
+            .await
+            .expect("idle watcher kept running after the receiver was dropped")
+            .expect("watcher task panicked");
+    }
 }

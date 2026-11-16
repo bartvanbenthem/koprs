@@ -187,51 +187,79 @@ pub fn watch_external_with_config<S>(
 where
     S: ExternalSource,
 {
-    tokio::task::spawn(async move {
-        let mut source = source;
-        let name = source.name().to_owned();
-        let mut consecutive_errors: u32 = 0;
+    tokio::task::spawn(poll_until_closed(source, config, tx))
+}
 
-        info!(source = %name, "External watcher started");
+/// Poll `source` once, failing the poll if it exceeds `poll_timeout`.
+async fn poll_once<S>(
+    source: &mut S,
+    poll_timeout: Option<Duration>,
+) -> Result<Vec<ExternalEvent<S::Item>>>
+where
+    S: ExternalSource,
+{
+    let Some(limit) = poll_timeout else {
+        return source.poll().await;
+    };
+    match tokio::time::timeout(limit, source.poll()).await {
+        Ok(polled) => polled,
+        Err(_elapsed) => Err(ExternalError::Internal(format!(
+            "poll timed out after {limit:?}"
+        ))),
+    }
+}
 
-        loop {
-            let polled = match config.poll_timeout {
-                Some(t) => tokio::time::timeout(t, source.poll())
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(ExternalError::Internal(format!(
-                            "poll timed out after {t:?}"
-                        )))
-                    }),
-                None => source.poll().await,
-            };
-            match polled {
-                Ok(events) => {
-                    consecutive_errors = 0;
-                    for event in events {
-                        if tx.send(event).await.is_err() {
-                            info!(source = %name, "Receiver dropped; stopping external watcher");
-                            return;
-                        }
+/// The task behind [`watch_external_with_config`]: poll, forward, wait, until
+/// every receiver is gone.
+///
+/// The closed channel is noticed while polling and while waiting, not only
+/// when an event is sent, so a source that never changes does not keep its
+/// task (and its connections) alive after the consumer went away.
+async fn poll_until_closed<S>(
+    mut source: S,
+    config: WatchConfig,
+    tx: mpsc::Sender<ExternalEvent<S::Item>>,
+) where
+    S: ExternalSource,
+{
+    let name = source.name().to_owned();
+    let mut consecutive_errors: u32 = 0;
+    info!(source = %name, "External watcher started");
+
+    'polling: loop {
+        let polled = tokio::select! {
+            () = tx.closed() => break 'polling,
+            polled = poll_once(&mut source, config.poll_timeout) => polled,
+        };
+        let wait = match polled {
+            Ok(events) => {
+                consecutive_errors = 0;
+                for event in events {
+                    if tx.send(event).await.is_err() {
+                        break 'polling;
                     }
-                    sleep(config.interval).await;
                 }
-                Err(e) => {
-                    consecutive_errors = consecutive_errors.saturating_add(1);
-                    let wait =
-                        backoff_wait(config.interval, consecutive_errors, config.max_backoff);
-                    warn!(
-                        source = %name,
-                        error = %e,
-                        attempt = consecutive_errors,
-                        ?wait,
-                        "Poll failed; retrying after backoff"
-                    );
-                    sleep(wait).await;
-                }
+                config.interval
             }
+            Err(e) => {
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                let wait = backoff_wait(config.interval, consecutive_errors, config.max_backoff);
+                warn!(
+                    source = %name,
+                    error = %e,
+                    attempt = consecutive_errors,
+                    ?wait,
+                    "Poll failed; retrying after backoff"
+                );
+                wait
+            }
+        };
+        tokio::select! {
+            () = tx.closed() => break 'polling,
+            () = sleep(wait) => {}
         }
-    })
+    }
+    info!(source = %name, "Receiver dropped; stopping external watcher");
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 
+use crate::error::{KubeGenericError, Result};
+
 /// Core Kubernetes resource abstraction used across `koprs`.
 ///
 /// `KubeResource` represents the minimal set of capabilities required
@@ -79,6 +81,24 @@ impl<T> KubeResource for T where
 /// ```
 pub fn is_being_deleted<T: KubeResource>(resource: &T) -> bool {
     resource.meta().deletion_timestamp.is_some()
+}
+
+/// The object's `metadata.name`, or [`KubeGenericError::MissingMetadata`].
+pub(crate) fn required_name<T: KubeResource>(resource: &T) -> Result<&str> {
+    resource
+        .meta()
+        .name
+        .as_deref()
+        .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))
+}
+
+/// The object's `metadata.namespace`, or [`KubeGenericError::MissingMetadata`].
+pub(crate) fn required_namespace<T: KubeResource>(resource: &T) -> Result<&str> {
+    resource
+        .meta()
+        .namespace
+        .as_deref()
+        .ok_or_else(|| KubeGenericError::MissingMetadata("namespace".into()))
 }
 
 /// Marker trait for Kubernetes resources that are **namespaced-scoped**.

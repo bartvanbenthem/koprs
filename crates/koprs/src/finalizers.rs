@@ -10,7 +10,7 @@
 //! * Removing fails (HTTP 422) if the finalizer at the expected index is not
 //!   yours, instead of removing someone else's.
 //!
-//! A failed precondition surfaces as a [`KubeGenericError::Kube`] error; let
+//! A failed precondition surfaces as a [`KubeGenericError::Kube`](crate::error::KubeGenericError::Kube) error; let
 //! the controller's error policy requeue so the next reconcile works from a
 //! fresh copy.
 
@@ -20,29 +20,13 @@ use kube::{Api, Client};
 use serde_json::json;
 use tracing::info;
 
-use crate::error::{KubeGenericError, Result};
+use crate::error::Result;
 use crate::scope::{ApiScope, Namespaced};
-use crate::traits::{KubeResource, NamespacedResource};
+use crate::traits::{KubeResource, NamespacedResource, required_name, required_namespace};
 
 // ---------------------------------------------------------------------------
 // Private core helpers
 // ---------------------------------------------------------------------------
-
-fn required_name<T: KubeResource>(resource: &T) -> Result<&str> {
-    resource
-        .meta()
-        .name
-        .as_deref()
-        .ok_or_else(|| KubeGenericError::MissingMetadata("name".into()))
-}
-
-fn required_namespace<T: KubeResource>(resource: &T) -> Result<&str> {
-    resource
-        .meta()
-        .namespace
-        .as_deref()
-        .ok_or_else(|| KubeGenericError::MissingMetadata("namespace".into()))
-}
 
 fn current_finalizers<T: KubeResource>(resource: &T) -> &[String] {
     resource.meta().finalizers.as_deref().unwrap_or(&[])

@@ -312,4 +312,67 @@ mod watcher_tests {
                 .is_none()
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Shutdown — a quiet or hung source stops when the receiver is dropped
+    // -----------------------------------------------------------------------
+
+    /// Never produces an event, so `tx.send` is never reached.
+    struct QuietSource;
+
+    impl ExternalSource for QuietSource {
+        type Item = String;
+
+        fn poll(&mut self) -> BoxFuture<'_, Result<Vec<ExternalEvent<String>>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn name(&self) -> &str {
+            "quiet"
+        }
+    }
+
+    /// A poll that never completes.
+    struct HungSource;
+
+    impl ExternalSource for HungSource {
+        type Item = String;
+
+        fn poll(&mut self) -> BoxFuture<'_, Result<Vec<ExternalEvent<String>>>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn name(&self) -> &str {
+            "hung"
+        }
+    }
+
+    #[tokio::test]
+    async fn quiet_source_shuts_down_when_receiver_is_dropped() {
+        let (tx, rx) = mpsc::channel::<ExternalEvent<String>>(16);
+        // A long interval: the task is asleep when the receiver goes away.
+        let handle = watch_external(QuietSource, Duration::from_secs(3600), tx);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(rx);
+
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("watcher kept sleeping after the receiver was dropped")
+            .expect("watcher task panicked");
+    }
+
+    #[tokio::test]
+    async fn hung_poll_shuts_down_when_receiver_is_dropped() {
+        let (tx, rx) = mpsc::channel::<ExternalEvent<String>>(16);
+        let handle = watch_external(HungSource, Duration::from_millis(10), tx);
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(rx);
+
+        timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("watcher stayed in a hung poll after the receiver was dropped")
+            .expect("watcher task panicked");
+    }
 }

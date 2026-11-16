@@ -1,8 +1,10 @@
 //! Object store poller.
 //!
 //! [`ObjectStorePoller`] lists objects under a bucket/prefix on every tick and
-//! emits [`ExternalEvent`]s when objects are added, changed (ETag differs), or
-//! removed. Requires the `object-store` Cargo feature.
+//! emits [`ExternalEvent`]s when objects are added, changed, or removed.
+//! A change is a different ETag, or, for backends that report no ETag, a
+//! different modification time or size. Requires the `object-store` Cargo
+//! feature.
 //!
 //! The poller accepts any backend that implements the
 //! [`object_store::ObjectStore`] trait — S3, GCS, Azure Blob,
@@ -10,12 +12,12 @@
 //! their preferred backend and pass it as `Arc<dyn ObjectStore>`. See the
 //! [crate README](https://docs.rs/koprs-external) for backend-specific examples.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::TryStreamExt;
 use futures::future::BoxFuture;
-use object_store::{ObjectStore, path::Path};
+use object_store::{ObjectMeta, ObjectStore, path::Path};
 use tracing::debug;
 
 use crate::{
@@ -39,15 +41,48 @@ pub struct StoredObject {
 }
 
 // ---------------------------------------------------------------------------
+// ObjectVersion
+// ---------------------------------------------------------------------------
+
+/// What tells two versions of the same object apart between polls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ObjectVersion {
+    /// The store's own content identifier.
+    ETag(String),
+    /// Fallback for backends that report no ETag.
+    Stat {
+        /// Modification time in nanoseconds since the Unix epoch, when it fits.
+        modified_unix_nanos: Option<i64>,
+        size: usize,
+    },
+}
+
+impl ObjectVersion {
+    fn of(meta: &ObjectMeta) -> Self {
+        match &meta.e_tag {
+            Some(etag) => Self::ETag(etag.clone()),
+            None => Self::Stat {
+                modified_unix_nanos: meta.last_modified.timestamp_nanos_opt(),
+                size: meta.size,
+            },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ObjectStorePoller
 // ---------------------------------------------------------------------------
 
 /// Polls any [`object_store::ObjectStore`]-compatible backend for object changes.
 ///
 /// On each tick the poller lists all objects under the configured prefix,
-/// compares them to the previous listing by ETag, and emits the appropriate
-/// events. Objects without an ETag are treated as always-new and produce an
-/// [`ExternalEvent::Added`] on every poll until an ETag is available.
+/// compares them to the previous listing, and emits the appropriate events,
+/// ordered by path: additions and modifications first, then removals.
+///
+/// Objects are compared by ETag. For backends that report no ETag the
+/// modification time and size are compared instead, so such objects are
+/// reported once when they appear, again only when they change, and as
+/// removed when they disappear.
 ///
 /// Backend-specific setup (S3, GCS, Azure) is done by the caller — see the
 /// [crate README](https://docs.rs/koprs-external) for examples.
@@ -55,8 +90,9 @@ pub struct ObjectStorePoller {
     store: Arc<dyn ObjectStore>,
     prefix: Option<Path>,
     name: String,
-    // path -> etag — tracks last-seen state for change detection
-    known: HashMap<String, String>,
+    /// Last-seen version of every object, by path. Sorted so events come out
+    /// in a stable order.
+    known: BTreeMap<String, ObjectVersion>,
 }
 
 impl ObjectStorePoller {
@@ -69,7 +105,7 @@ impl ObjectStorePoller {
             name: store.to_string(),
             store,
             prefix: None,
-            known: HashMap::new(),
+            known: BTreeMap::new(),
         }
     }
 
@@ -86,6 +122,66 @@ impl ObjectStorePoller {
         self.name = name.into();
         self
     }
+
+    /// Compare `listing` with the previous one, return the differences and
+    /// remember `listing` for the next poll.
+    pub(crate) fn diff_listing(
+        &mut self,
+        listing: Vec<ObjectMeta>,
+    ) -> Vec<ExternalEvent<StoredObject>> {
+        let mut current: BTreeMap<String, ObjectVersion> = BTreeMap::new();
+        let mut events = Vec::new();
+
+        for meta in listing {
+            let path = meta.location.to_string();
+            let version = ObjectVersion::of(&meta);
+            let object = StoredObject {
+                path: path.clone(),
+                etag: meta.e_tag,
+                size: meta.size,
+            };
+            match self.known.get(&path) {
+                None => events.push(ExternalEvent::Added(object)),
+                Some(known_version) if *known_version != version => {
+                    events.push(ExternalEvent::Modified(object));
+                }
+                Some(_unchanged) => {}
+            }
+            current.insert(path, version);
+        }
+
+        for path in self.known.keys() {
+            if !current.contains_key(path) {
+                events.push(ExternalEvent::Removed(StoredObject {
+                    path: path.clone(),
+                    etag: None,
+                    size: 0,
+                }));
+            }
+        }
+
+        self.known = current;
+        events
+    }
+
+    async fn poll_once(&mut self) -> Result<Vec<ExternalEvent<StoredObject>>> {
+        let mut listing: Vec<ObjectMeta> = self
+            .store
+            .list(self.prefix.as_ref())
+            .try_collect()
+            .await
+            .map_err(|e| ExternalError::Internal(format!("object store list failed: {e}")))?;
+        listing.sort_by(|left, right| left.location.cmp(&right.location));
+
+        let events = self.diff_listing(listing);
+        debug!(
+            source = %self.name,
+            events = events.len(),
+            objects = self.known.len(),
+            "Object store poll completed"
+        );
+        Ok(events)
+    }
 }
 
 impl ExternalSource for ObjectStorePoller {
@@ -96,72 +192,6 @@ impl ExternalSource for ObjectStorePoller {
     }
 
     fn poll(&mut self) -> BoxFuture<'_, Result<Vec<ExternalEvent<StoredObject>>>> {
-        // Clone the Arc and prefix so the async block owns them, avoiding any
-        // self-referential borrow across the .await point on the listing stream.
-        let store = Arc::clone(&self.store);
-        let prefix = self.prefix.clone();
-        let this = self;
-
-        Box::pin(async move {
-            let stream = store.list(prefix.as_ref());
-            let listing: Vec<_> = stream
-                .try_collect()
-                .await
-                .map_err(|e| ExternalError::Internal(format!("object store list failed: {e}")))?;
-
-            let mut current: HashMap<String, StoredObject> = HashMap::new();
-            for meta in listing {
-                let path = meta.location.to_string();
-                current.insert(
-                    path.clone(),
-                    StoredObject {
-                        path,
-                        etag: meta.e_tag,
-                        size: meta.size,
-                    },
-                );
-            }
-
-            let mut events: Vec<ExternalEvent<StoredObject>> = Vec::new();
-
-            // Added and modified
-            for (path, obj) in &current {
-                match this.known.get(path) {
-                    None => events.push(ExternalEvent::Added(obj.clone())),
-                    Some(known_etag) => {
-                        if obj.etag.as_deref() != Some(known_etag.as_str()) {
-                            events.push(ExternalEvent::Modified(obj.clone()));
-                        }
-                    }
-                }
-            }
-
-            // Removed
-            for path in this.known.keys() {
-                if !current.contains_key(path) {
-                    events.push(ExternalEvent::Removed(StoredObject {
-                        path: path.clone(),
-                        etag: None,
-                        size: 0,
-                    }));
-                }
-            }
-
-            // Advance state: only track objects that have an ETag for diffing
-            this.known = current
-                .into_iter()
-                .filter_map(|(k, v)| v.etag.map(|e| (k, e)))
-                .collect();
-
-            debug!(
-                source = %this.name,
-                added    = events.iter().filter(|e| matches!(e, ExternalEvent::Added(_))).count(),
-                modified = events.iter().filter(|e| matches!(e, ExternalEvent::Modified(_))).count(),
-                removed  = events.iter().filter(|e| matches!(e, ExternalEvent::Removed(_))).count(),
-                "Object store poll completed"
-            );
-
-            Ok(events)
-        })
+        Box::pin(self.poll_once())
     }
 }

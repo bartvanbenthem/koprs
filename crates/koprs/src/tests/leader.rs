@@ -476,4 +476,54 @@ mod leader_tests {
             Some("pod-1")
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Observation timing
+    // -----------------------------------------------------------------------
+
+    /// A slow GET must not eat into the holder's lease: the expiry clock
+    /// starts when the response arrives, not when the request was sent.
+    #[tokio::test]
+    async fn slow_read_does_not_shorten_the_holders_lease() {
+        const LEASE_SECS: i32 = 2;
+        const SLOW_READ: Duration = Duration::from_millis(1500);
+        const WAIT_AFTER_READ: Duration = Duration::from_millis(700);
+
+        let (mut el, mut handle) = elector("pod-1");
+        let server = tokio::spawn(async move {
+            // The first read is slow: the holder may have renewed right
+            // before the response was produced.
+            let (_, send) = handle.next_request().await.unwrap();
+            tokio::time::sleep(SLOW_READ).await;
+            send.send_response(json_response(
+                StatusCode::OK,
+                lease_json(Some("other-pod"), LEASE_SECS, 0, "5", 0),
+            ));
+            // Same rv: only `WAIT_AFTER_READ` has passed since it was seen,
+            // although more than the lease duration passed since the first
+            // request was sent.
+            let (_, send) = handle.next_request().await.unwrap();
+            send.send_response(json_response(
+                StatusCode::OK,
+                lease_json(Some("other-pod"), LEASE_SECS, 0, "5", 0),
+            ));
+            // A takeover attempt (PUT) would arrive here and fail the test.
+            assert!(
+                handle.next_request().await.is_none(),
+                "candidate tried to take over a lease that is still valid"
+            );
+        });
+
+        assert!(matches!(
+            el.try_acquire_or_renew().await.unwrap(),
+            Attempt::HeldByOther(_)
+        ));
+        tokio::time::sleep(WAIT_AFTER_READ).await;
+        assert_eq!(
+            el.try_acquire_or_renew().await.unwrap(),
+            Attempt::HeldByOther("other-pod".into())
+        );
+        drop(el);
+        server.await.unwrap();
+    }
 }

@@ -141,6 +141,11 @@ impl LeaderElector {
     /// Record the lease's current state. The observation time only moves when
     /// the `resourceVersion` changes, which is what makes expiry detection
     /// independent of the writer's clock.
+    ///
+    /// `at` must not be later than the moment the state was true: pass the
+    /// time the response arrived for a lease read from the API, and the time
+    /// *before* the request for a lease this replica wrote itself (so its own
+    /// renew deadline is counted from the earliest possible write).
     fn observe(&mut self, lease: &Lease, at: Instant) {
         let rv = lease.metadata.resource_version.clone();
         let changed = self
@@ -204,7 +209,13 @@ impl LeaderElector {
             };
         };
 
-        self.observe(&existing, started);
+        // Timed *after* the read returned. The lease may have been renewed at
+        // any moment up to now, so dating the observation at `started` would
+        // let a slow GET shorten the holder's lease from our point of view and
+        // allow a takeover while the holder is still inside its renew
+        // deadline. Expiry itself is still judged against `started` below,
+        // which errs on the side of waiting longer.
+        self.observe(&existing, Instant::now());
 
         let spec = existing.spec.as_ref();
         let holder = spec

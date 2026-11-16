@@ -420,4 +420,61 @@ mod http_tests {
         }
         server.abort();
     }
+
+    // -----------------------------------------------------------------------
+    // poll — unchanged body without ETag / Last-Modified
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn poll_emits_nothing_when_body_is_unchanged_and_server_sends_no_validators() {
+        let state = MockState::default();
+        *state.body.lock().unwrap() = Some("version-1".to_string());
+
+        let url = start_server(state.clone()).await;
+        let mut poller = HttpPoller::new(url);
+
+        let events = poll_with_timeout(&mut poller).await;
+        assert!(matches!(events[0], ExternalEvent::Added(_)));
+
+        // The server answers 200 with the same body every time.
+        for _ in 0..3 {
+            let events = poll_with_timeout(&mut poller).await;
+            assert!(
+                events.is_empty(),
+                "unchanged body must not be reported as a change: {events:?}"
+            );
+        }
+
+        // A real change is still reported, exactly once.
+        *state.body.lock().unwrap() = Some("version-2".to_string());
+        let events = poll_with_timeout(&mut poller).await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], ExternalEvent::Modified(_)));
+        assert!(poll_with_timeout(&mut poller).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_emits_added_again_when_the_same_body_returns_after_a_removal() {
+        let state = MockState::default();
+        *state.body.lock().unwrap() = Some("version-1".to_string());
+
+        let url = start_server(state.clone()).await;
+        let mut poller = HttpPoller::new(url);
+        assert!(matches!(
+            poll_with_timeout(&mut poller).await[0],
+            ExternalEvent::Added(_)
+        ));
+
+        *state.body.lock().unwrap() = None;
+        assert!(matches!(
+            poll_with_timeout(&mut poller).await[0],
+            ExternalEvent::Removed(_)
+        ));
+
+        // Same bytes as before the removal: the resource is new again.
+        *state.body.lock().unwrap() = Some("version-1".to_string());
+        let events = poll_with_timeout(&mut poller).await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], ExternalEvent::Added(_)));
+    }
 }

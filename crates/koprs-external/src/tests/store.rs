@@ -256,4 +256,70 @@ mod store_tests {
                 .with_name("my-store");
         assert_eq!(poller.name(), "my-store");
     }
+
+    // -----------------------------------------------------------------------
+    // Backends without ETags — compared by modification time and size
+    // -----------------------------------------------------------------------
+
+    /// Listing entry as a backend without ETag support reports it.
+    fn meta_without_etag(
+        path: &str,
+        modified: std::time::SystemTime,
+        size: usize,
+    ) -> object_store::ObjectMeta {
+        object_store::ObjectMeta {
+            location: Path::from(path),
+            last_modified: modified.into(),
+            size,
+            e_tag: None,
+            version: None,
+        }
+    }
+
+    #[test]
+    fn objects_without_etag_are_reported_once_then_only_on_change_and_removal() {
+        let (_store, mut poller) = in_memory_poller();
+        let written = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let events = poller.diff_listing(vec![meta_without_etag("a.yaml", written, 10)]);
+        assert!(matches!(events.as_slice(), [ExternalEvent::Added(_)]));
+
+        // Same listing again: nothing changed, nothing is reported.
+        let events = poller.diff_listing(vec![meta_without_etag("a.yaml", written, 10)]);
+        assert!(events.is_empty(), "unexpected events: {events:?}");
+
+        // Rewritten later: reported as modified.
+        let rewritten = written + Duration::from_secs(60);
+        let events = poller.diff_listing(vec![meta_without_etag("a.yaml", rewritten, 10)]);
+        assert!(matches!(events.as_slice(), [ExternalEvent::Modified(_)]));
+
+        // Same time, different size: also modified.
+        let events = poller.diff_listing(vec![meta_without_etag("a.yaml", rewritten, 11)]);
+        assert!(matches!(events.as_slice(), [ExternalEvent::Modified(_)]));
+
+        // Gone: reported as removed, exactly once.
+        let events = poller.diff_listing(vec![]);
+        assert!(
+            matches!(events.as_slice(), [ExternalEvent::Removed(object)] if object.path == "a.yaml")
+        );
+        assert!(poller.diff_listing(vec![]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_reports_events_in_path_order() {
+        let (store, mut poller) = in_memory_poller();
+        for key in ["c.yaml", "a.yaml", "b.yaml"] {
+            put(&store, key, "data").await;
+        }
+
+        let paths: Vec<String> = poll(&mut poller)
+            .await
+            .into_iter()
+            .map(|event| match event {
+                ExternalEvent::Added(object) => object.path,
+                other => panic!("expected Added, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(paths, ["a.yaml", "b.yaml", "c.yaml"]);
+    }
 }

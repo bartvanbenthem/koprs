@@ -48,10 +48,12 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use kube::Client;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch::{Receiver as ShutdownReceiver, Sender as ShutdownSender};
 use tracing::{debug, error, info, warn};
 
 use crate::error::{KubeGenericError, Result};
@@ -62,6 +64,17 @@ use crate::traits::KubeResource;
 /// Upper bound on how long [`ControllerBuilder::run`] waits to release the
 /// leader lease during shutdown.
 const LEASE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Pause after a failed `accept` on the health port before trying again.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+/// Maximum time a probe client may take to send its request headers, so idle
+/// connections cannot pile up on the health port.
+const HEALTH_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `error` label recorded in the metrics for a reconcile that hit
+/// [`ControllerBuilder::reconcile_timeout`].
+const TIMEOUT_ERROR_LABEL: &str = "timeout";
 
 // ---------------------------------------------------------------------------
 // Re-exports — operators only need `use koprs::controller::*`
@@ -190,47 +203,81 @@ where
 ///
 /// `GET /healthz` — `200 OK` always (liveness).
 /// `GET /readyz`  — `200 OK` once `ready` flips to `true`, else `503` (readiness).
-pub(crate) async fn serve_health(listener: tokio::net::TcpListener, ready: Arc<AtomicBool>) {
-    use bytes::Bytes;
-    use http_body_util::Full;
+///
+/// A failed `accept` (typically `EMFILE` or `ECONNABORTED`) is transient: it
+/// is logged and retried. Ending the loop instead would make the liveness
+/// probe fail and get a healthy pod restarted.
+pub(crate) async fn serve_health(listener: TcpListener, ready: Arc<AtomicBool>) {
+    loop {
+        let stream = match listener.accept().await {
+            Ok((stream, _peer)) => stream,
+            Err(e) => {
+                warn!(error = %e, "Health server failed to accept a connection");
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                continue;
+            }
+        };
+        tokio::spawn(serve_health_connection(stream, ready.clone()));
+    }
+}
+
+async fn serve_health_connection(stream: TcpStream, ready: Arc<AtomicBool>) {
     use hyper::body::Incoming;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
-    use hyper::{Request, Response, StatusCode};
-    use hyper_util::rt::TokioIo;
+    use hyper_util::rt::{TokioIo, TokioTimer};
 
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            break;
-        };
-        let ready = ready.clone();
-        tokio::spawn(async move {
-            let io = TokioIo::new(stream);
-            let svc = service_fn(move |req: Request<Incoming>| {
-                let ready = ready.clone();
-                async move {
-                    let (status, body): (StatusCode, &'static str) =
-                        if req.uri().path() == "/readyz" {
-                            if ready.load(Ordering::Acquire) {
-                                (StatusCode::OK, "ok")
-                            } else {
-                                (StatusCode::SERVICE_UNAVAILABLE, "not ready")
-                            }
-                        } else {
-                            (StatusCode::OK, "ok")
-                        };
-                    Ok::<_, std::convert::Infallible>(
-                        Response::builder()
-                            .status(status)
-                            .header("content-type", "text/plain")
-                            .body(Full::new(Bytes::from_static(body.as_bytes())))
-                            .unwrap(),
-                    )
-                }
-            });
-            let _ = http1::Builder::new().serve_connection(io, svc).await;
-        });
-    }
+    let service = service_fn(move |request: hyper::Request<Incoming>| {
+        let is_ready = ready.load(Ordering::Acquire);
+        async move { Ok::<_, std::convert::Infallible>(health_response(request.uri().path(), is_ready)) }
+    });
+    let _ = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEALTH_HEADER_READ_TIMEOUT)
+        .serve_connection(TokioIo::new(stream), service)
+        .await;
+}
+
+/// The probe answer for `path`: only `/readyz` depends on readiness.
+fn health_response(
+    path: &str,
+    is_ready: bool,
+) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
+    use hyper::StatusCode;
+    use hyper::header::{CONTENT_TYPE, HeaderValue};
+
+    let (status, body) = if path == "/readyz" && !is_ready {
+        (StatusCode::SERVICE_UNAVAILABLE, "not ready")
+    } else {
+        (StatusCode::OK, "ok")
+    };
+    let mut response = hyper::Response::new(http_body_util::Full::new(bytes::Bytes::from_static(
+        body.as_bytes(),
+    )));
+    *response.status_mut() = status;
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    response
+}
+
+/// Bind the health port and serve probes in the background.
+async fn start_health_server(port: u16, ready: Arc<AtomicBool>) -> Result<()> {
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    info!(port, "Health server listening");
+    tokio::spawn(serve_health(listener, ready));
+    Ok(())
+}
+
+/// Bind the metrics port, serve `/metrics` in the background and return the
+/// collectors the reconcile loop records into.
+async fn start_metrics_server(port: u16) -> Result<Arc<Metrics>> {
+    let registry = prometheus::Registry::new();
+    let metrics = Arc::new(Metrics::new_registered("", &registry)?);
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    info!(port, "Metrics server listening");
+    tokio::spawn(serve_metrics(listener, registry));
+    Ok(metrics)
 }
 
 // ---------------------------------------------------------------------------
@@ -239,10 +286,122 @@ pub(crate) async fn serve_health(listener: tokio::net::TcpListener, ready: Arc<A
 
 /// Resolves once the shutdown flag flips to `true`. Never resolves if the
 /// sender is dropped without signalling.
-async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+async fn wait_for_shutdown(mut rx: ShutdownReceiver<bool>) {
     if rx.wait_for(|stop| *stop).await.is_err() {
         std::future::pending::<()>().await;
     }
+}
+
+/// Wait for SIGTERM / Ctrl+C, then mark the pod not ready and tell the
+/// controller to stop.
+async fn announce_shutdown(
+    shutdown_tx: ShutdownSender<bool>,
+    ready: Arc<AtomicBool>,
+    kind: String,
+) {
+    shutdown_signal().await;
+    info!(%kind, "Shutdown signal received");
+    ready.store(false, Ordering::Release);
+    shutdown_tx.send(true).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Internal: leadership
+// ---------------------------------------------------------------------------
+
+/// Whether [`wait_for_leadership`] ended with the lease or with a shutdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Leadership {
+    Acquired,
+    ShutdownRequested,
+}
+
+/// Block until the lease is held or a shutdown is requested, whichever is first.
+async fn wait_for_leadership(
+    elector: &mut LeaderElector,
+    shutdown_rx: ShutdownReceiver<bool>,
+) -> Leadership {
+    tokio::select! {
+        () = elector.acquire() => Leadership::Acquired,
+        () = wait_for_shutdown(shutdown_rx) => Leadership::ShutdownRequested,
+    }
+}
+
+/// Hand the lease back so a standby takes over without waiting for expiry.
+/// Best effort: a failure only delays the takeover by the lease duration.
+async fn release_lease(elector: &mut LeaderElector) {
+    match tokio::time::timeout(LEASE_RELEASE_TIMEOUT, elector.release()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "Failed to release leader lease"),
+        Err(_) => warn!("Timed out releasing leader lease"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Internal: one reconcile attempt
+// ---------------------------------------------------------------------------
+
+/// Everything a reconcile attempt needs besides the object and the context.
+struct ReconcileRunner<R> {
+    reconciler: Arc<R>,
+    metrics: Option<Arc<Metrics>>,
+    kind: String,
+    timeout: Option<Duration>,
+}
+
+impl<R> ReconcileRunner<R> {
+    fn record_success(&self, elapsed: Duration) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_success(&self.kind, elapsed);
+        }
+    }
+
+    fn record_failure(&self, error_label: &str, elapsed: Duration) {
+        if let Some(metrics) = &self.metrics {
+            metrics.record_failure(&self.kind, error_label, elapsed);
+        }
+    }
+}
+
+/// Run one reconcile, bounded by the configured timeout, and record its
+/// outcome in the metrics.
+///
+/// A reconcile that exceeds the timeout is cancelled and the object is
+/// requeued after the same duration; it is counted as a failure with the
+/// [`TIMEOUT_ERROR_LABEL`] error label.
+async fn reconcile_once<CR, T, R>(
+    runner: Arc<ReconcileRunner<R>>,
+    cr: Arc<CR>,
+    ctx: Arc<Context<T>>,
+) -> std::result::Result<Action, R::Error>
+where
+    CR: KubeResource,
+    T: Send + Sync + 'static,
+    R: Reconciler<CR, T>,
+{
+    let started = Instant::now();
+    let attempt = runner.reconciler.reconcile(cr, ctx);
+    let outcome = match runner.timeout {
+        Some(limit) => tokio::time::timeout(limit, attempt)
+            .await
+            .map_err(|_elapsed| limit),
+        None => Ok(attempt.await),
+    };
+    let elapsed = started.elapsed();
+
+    let result = match outcome {
+        Ok(result) => result,
+        Err(limit) => {
+            warn!(kind = %runner.kind, timeout = ?limit, "Reconcile timed out, requeueing");
+            runner.record_failure(TIMEOUT_ERROR_LABEL, elapsed);
+            return Ok(Action::requeue(limit));
+        }
+    };
+    match &result {
+        Ok(_) => runner.record_success(elapsed),
+        Err(e) => runner.record_failure(runner.reconciler.error_label(e), elapsed),
+    }
+    result
 }
 
 /// Resolves on SIGTERM (Unix) or Ctrl+C (all platforms).
@@ -693,151 +852,100 @@ where
         let leader_config = self.resolve_leader_election()?;
         info!(%kind, "Starting controller");
 
-        // --- Health probes ---
         let ready = Arc::new(AtomicBool::new(false));
         if let Some(port) = self.health_port {
-            let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-            info!(port, "Health server listening");
-            tokio::spawn(serve_health(listener, ready.clone()));
+            start_health_server(port, ready.clone()).await?;
         }
-
-        // --- Metrics ---
-        let metrics = if let Some(port) = self.metrics_port {
-            let registry = prometheus::Registry::new();
-            let metrics = Arc::new(Metrics::new_registered("", &registry)?);
-            let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
-            info!(port, "Metrics server listening");
-            tokio::spawn(serve_metrics(listener, registry));
-            Some(metrics)
-        } else {
-            None
+        let metrics = match self.metrics_port {
+            Some(port) => Some(start_metrics_server(port).await?),
+            None => None,
         };
 
-        // --- Shutdown signal ---
-        // `_shutdown_tx` is kept alive for the whole function so receivers
-        // never observe a closed channel.
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        if self.graceful_shutdown {
-            let tx = _shutdown_tx.clone();
-            let ready = ready.clone();
-            let kind = kind.clone();
-            tokio::spawn(async move {
-                shutdown_signal().await;
-                info!(%kind, "Shutdown signal received");
-                ready.store(false, Ordering::Release);
-                tx.send(true).ok();
-            });
-        }
-
         // Start-up is complete: report ready. Standby replicas are ready too,
-        // so rolling updates are not blocked by leader election.
+        // so rolling updates are not blocked by leader election. This happens
+        // before the signal handler is installed, so a shutdown can never be
+        // overwritten by a late "ready".
         ready.store(true, Ordering::Release);
 
-        // --- Leader election: wait for the lease ---
-        let mut elector = leader_config.map(|cfg| LeaderElector::new(cfg, client.clone()));
-        if let Some(el) = elector.as_mut() {
-            tokio::select! {
-                () = el.acquire() => {}
-                () = wait_for_shutdown(shutdown_rx.clone()) => {
-                    info!(%kind, "Shutdown requested before leadership was acquired");
-                    return Ok(());
-                }
-            }
+        // `shutdown_tx` is kept alive for the whole function so receivers
+        // never observe a closed channel.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        if self.graceful_shutdown {
+            tokio::spawn(announce_shutdown(
+                shutdown_tx.clone(),
+                ready.clone(),
+                kind.clone(),
+            ));
         }
 
-        // --- Controller ---
-        let mut ctl = kube_runtime::Controller::new(self.api, self.watcher_config);
-        if let Some(n) = self.concurrency {
-            ctl = ctl.with_config(kube_runtime::controller::Config::default().concurrency(n));
+        let mut elector = leader_config.map(|config| LeaderElector::new(config, client));
+        if let Some(elector) = elector.as_mut()
+            && wait_for_leadership(elector, shutdown_rx.clone()).await
+                == Leadership::ShutdownRequested
+        {
+            info!(%kind, "Shutdown requested before leadership was acquired");
+            return Ok(());
+        }
+
+        let mut controller = kube_runtime::Controller::new(self.api, self.watcher_config);
+        if let Some(limit) = self.concurrency {
+            controller = controller
+                .with_config(kube_runtime::controller::Config::default().concurrency(limit));
         }
         if let Some(configure) = self.configure {
-            ctl = configure(ctl);
+            controller = configure(controller);
         }
         if self.graceful_shutdown {
             // kube-runtime stops scheduling new work and drains in-flight
             // reconciles before the stream ends.
-            ctl = ctl.graceful_shutdown_on(wait_for_shutdown(shutdown_rx.clone()));
+            controller = controller.graceful_shutdown_on(wait_for_shutdown(shutdown_rx));
         }
 
         let reconciler = Arc::new(reconciler);
-        let error_policy_r = reconciler.clone();
-        let reconcile_timeout = self.reconcile_timeout;
-        let kind_label = kind.clone();
-
-        let run_loop = ctl
+        let runner = Arc::new(ReconcileRunner {
+            reconciler: reconciler.clone(),
+            metrics,
+            kind: kind.clone(),
+            timeout: self.reconcile_timeout,
+        });
+        let reconcile_loop = controller
             .run(
-                move |cr, ctx| {
-                    let r = reconciler.clone();
-                    let metrics = metrics.clone();
-                    let kind = kind_label.clone();
-                    async move {
-                        let started = std::time::Instant::now();
-                        let outcome = match reconcile_timeout {
-                            Some(t) => tokio::time::timeout(t, r.reconcile(cr, ctx))
-                                .await
-                                .map_err(|_| t),
-                            None => Ok(r.reconcile(cr, ctx).await),
-                        };
-                        let elapsed = started.elapsed();
-                        match outcome {
-                            Ok(result) => {
-                                if let Some(m) = &metrics {
-                                    match &result {
-                                        Ok(_) => m.record_success(&kind, elapsed),
-                                        Err(e) => {
-                                            m.record_failure(&kind, r.error_label(e), elapsed)
-                                        }
-                                    }
-                                }
-                                result
-                            }
-                            Err(t) => {
-                                warn!(%kind, timeout = ?t, "Reconcile timed out, requeueing");
-                                if let Some(m) = &metrics {
-                                    m.record_failure(&kind, "timeout", elapsed);
-                                }
-                                Ok(Action::requeue(t))
-                            }
-                        }
-                    }
-                },
-                move |cr, err, ctx| error_policy_r.error_policy(cr, err, ctx),
+                move |cr, ctx| reconcile_once(runner.clone(), cr, ctx),
+                move |cr, err, ctx| reconciler.error_policy(cr, err, ctx),
                 context,
             )
             .for_each(|result| async move {
                 match result {
-                    Ok((obj, _)) => debug!(name = %obj.name, "Reconcile succeeded"),
+                    Ok((object, _action)) => debug!(name = %object.name, "Reconcile succeeded"),
                     Err(e) => warn!(error = %e, "Reconcile failed"),
                 }
             });
 
         let outcome = match elector.as_mut() {
-            Some(el) => {
+            Some(elector) => {
                 tokio::select! {
-                    () = run_loop => Ok(()),
-                    lost = el.renew_until_lost() => {
-                        // Dropping `run_loop` cancels in-flight reconciles: we
-                        // are no longer the leader and must not keep writing.
+                    () = reconcile_loop => Ok(()),
+                    lost = elector.renew_until_lost() => {
+                        // Dropping `reconcile_loop` cancels in-flight
+                        // reconciles: we are no longer the leader and must
+                        // not keep writing.
                         error!(%kind, error = %lost, "Stopping controller");
                         Err(lost)
                     }
                 }
             }
             None => {
-                run_loop.await;
+                reconcile_loop.await;
                 Ok(())
             }
         };
 
         if outcome.is_ok()
-            && let Some(el) = elector.as_mut()
+            && let Some(elector) = elector.as_mut()
         {
-            match tokio::time::timeout(LEASE_RELEASE_TIMEOUT, el.release()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => warn!(error = %e, "Failed to release leader lease"),
-                Err(_) => warn!("Timed out releasing leader lease"),
-            }
+            release_lease(elector).await;
         }
+        drop(shutdown_tx);
 
         info!(%kind, "Controller stopped");
         outcome
